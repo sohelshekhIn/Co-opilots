@@ -1,0 +1,4 @@
+playwright
+pyautogui
+pillow
+sv-ttk
