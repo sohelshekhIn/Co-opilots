@@ -80,7 +80,7 @@ class Overlay:
 
     KEY = "#010203"
     ACCENT = "#3b8eea"
-    TINT = 0.08
+    TINT = 0.05
 
     def __init__(self, root, on_stop):
         self.root = root
@@ -209,6 +209,7 @@ class App:
         self.tasks = queue.Queue()
         self.stop = threading.Event()
         self._busy = False
+        self._hands_on = False
         self._answered = False
         self._last_error = ""
         self._started_at = 0.0
@@ -268,7 +269,7 @@ class App:
 
         body = ttk.Frame(side)
         body.pack(fill="both", expand=True, pady=(12, 0))
-        self.chat = tk.Text(body, wrap="word", state="disabled", font=("Segoe UI", 11), relief="flat",
+        self.chat = tk.Text(body, wrap="word", font=("Segoe UI", 11), relief="flat", insertwidth=0,
                             bg=self.text_bg, fg=self.text_fg, padx=14, pady=12, highlightthickness=0,
                             cursor="xterm", spacing1=2, spacing3=2, exportselection=True,
                             selectbackground="#264f78" if self.dark else "#b3d4fc",
@@ -298,7 +299,11 @@ class App:
         self.chat.tag_configure("error", foreground="#ff6b6b" if self.dark else "#c42b1c")
         self.chat.tag_configure("working", foreground=accent, font=("Segoe UI", 10, "italic"))
         # Read-only Text never takes focus on its own, so Ctrl+C would not reach it.
+        # Normal state so the mouse can select (a disabled Text will not), with every edit blocked here.
         self.chat.bind("<Button-1>", lambda _e: self.chat.focus_set(), add="+")
+        self.chat.bind("<Key>", self._chat_key)
+        for event in ("<<Paste>>", "<<Cut>>", "<<Clear>>", "<<PasteSelection>>", "<Button-2>"):
+            self.chat.bind(event, lambda _e: "break")
         self.chat.bind("<Control-c>", lambda _e: (self._copy_chat(), "break")[1])
         self.chat.bind("<Control-a>", lambda _e: (self.chat.tag_add("sel", "1.0", "end-1c"), "break")[1])
         menu = tk.Menu(self.root, tearoff=0)
@@ -344,6 +349,7 @@ class App:
                 answer=lambda text: self.messages.put(("answer", str(text))),
                 say=lambda text: self.messages.put(("say", str(text))),
                 ask=lambda payload, reply: self.messages.put(("ask", (payload, reply))),
+                hands_on=lambda: self.messages.put(("hands_on", None)),
             )
         finally:
             self.messages.put(("closed", None))
@@ -351,10 +357,8 @@ class App:
     # ---- transcript ----
 
     def _write(self, runs):
-        self.chat.configure(state="normal")
         for text, tags in runs:
             self.chat.insert("end", text, tags)
-        self.chat.configure(state="disabled")
         self.chat.see("end")
 
     def _fit_column(self, event):
@@ -364,13 +368,23 @@ class App:
             self.chat.configure(padx=pad)
             self.bottom.pack_configure(padx=(max(0, pad - 16), max(0, pad - 16) + 18))
 
+    _NAV_KEYS = {"Left", "Right", "Up", "Down", "Home", "End", "Prior", "Next", "Shift_L", "Shift_R",
+                 "Control_L", "Control_R"}
+
+    def _chat_key(self, event):
+        """Read-only transcript: allow copy, select-all, and moving or extending the selection."""
+        ctrl = event.state & 0x4
+        if event.keysym in self._NAV_KEYS or (ctrl and event.keysym.lower() in ("c", "a", "insert")):
+            return None
+        return "break"
+
     def _copy_chat(self):
         try:
             text = self.chat.get("sel.first", "sel.last")
         except tk.TclError:
             return
         self.root.clipboard_clear()
-        self.root.clipboard_append("\n".join(line.strip() for line in text.replace("\u200b", "").split("\n")))
+        self.root.clipboard_append("\n".join(line.strip() for line in text.replace("\u200b", "").split("\n")).strip())
 
     def _say_user(self, text):
         # Tk paints a tag's background out to the margin when it covers a line's first character
@@ -387,21 +401,17 @@ class App:
         self._write(runs + [("\n", ("reply", "pad"))] + body + [("\n", ("reply", "pad"))])
 
     def _working(self, label):
-        self.chat.configure(state="normal")
         ranges = self.chat.tag_ranges("working")
         if ranges:
             self.chat.delete(ranges[0], ranges[-1])
         if label:
             self.chat.insert("end", label + "\n", ("working",))
-        self.chat.configure(state="disabled")
         self.chat.see("end")
 
     def _new_conversation(self):
         if self._busy:
             return
-        self.chat.configure(state="normal")
         self.chat.delete("1.0", "end")
-        self.chat.configure(state="disabled")
         self._say_copilot(WELCOME)
 
     # ---- developer log ----
@@ -445,9 +455,8 @@ class App:
         self._say_user(task)
         self._working("Working on it…")
         self._dev_log(f"▶ {task}")
+        self._hands_on = False
         self.tasks.put(task)
-        if self.minimize.get():
-            self.root.after(150, self.root.iconify)
 
     def _on_stop(self):
         self.stop.set()
@@ -516,8 +525,10 @@ class App:
                 reply.put({"choices": picked, "text": text})
             result.pack(anchor="w", pady=(8, 0))
             self._working("Working on it…")
-            if self.minimize.get():
-                self.root.after(300, self.root.iconify)
+            if self._hands_on:
+                self.overlay.show()
+                if self.minimize.get():
+                    self.root.after(300, self.root.iconify)
 
         def submit():
             picked = any(v.get() for _o, v in checks) or choice.get()
@@ -532,10 +543,8 @@ class App:
         ttk.Button(buttons, text="Submit", style="Accent.TButton", command=submit).pack(side="left")
         self._open_card = frame
         self._write([("● ", ("who", "dot")), (f"{APP_NAME} needs your input\n", ("who",))])
-        self.chat.configure(state="normal")
         self.chat.window_create("end", window=frame)
         self.chat.insert("end", "\n")
-        self.chat.configure(state="disabled")
         self.chat.see("end")
         if details is not None and not payload["options"]:
             details.focus_set()
@@ -566,8 +575,12 @@ class App:
                     if message.startswith("Sign in"):
                         self.overlay.hide()
                         self.root.deiconify()
-                    elif message.startswith("Step"):
-                        self.overlay.show()
+                elif kind == "hands_on":
+                    self._hands_on = True
+                    self._working("Using the mouse and keyboard…")
+                    self.overlay.show()
+                    if self.minimize.get():
+                        self.root.iconify()
                 elif kind == "log":
                     self._dev_log(message)
                 elif kind == "say":

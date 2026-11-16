@@ -255,6 +255,14 @@ def _find_window(title):
     return matches[0]
 
 
+def foreground_title():
+    user32 = ctypes.windll.user32
+    hwnd = user32.GetForegroundWindow()
+    buffer = ctypes.create_unicode_buffer(512)
+    user32.GetWindowTextW(hwnd, buffer, 512)
+    return buffer.value
+
+
 def focus_window(title):
     window = _find_window(title)
     if window.isMinimized:

@@ -12,6 +12,7 @@ import copilot_chat
 import desktop
 import files
 import protocol
+import safety
 import sysinfo
 
 MAX_ROUNDS = 40
@@ -21,11 +22,13 @@ _SETTLE = 0.35
 class Tools:
     """What skills need besides the action itself: the chat's browser, and ways to talk to the user."""
 
-    def __init__(self, chat, log, stop, say, ask):
+    def __init__(self, chat, log, stop, say, ask, hands_on=None):
         self.chat, self.log, self.stop = chat, log, stop
         self.say = say or (lambda text: log("Note: " + text))
         self._ask = ask
+        self.hands_on = hands_on or (lambda: None)
         self.ado = ado.Ado(chat)
+        self.allowed = set()
 
     def ask(self, question, options=(), multi=False, allow_text=True):
         """Show a question card and wait for the answer. Returns {"choices": [...], "text": "..."} or None."""
@@ -41,18 +44,25 @@ class Tools:
             except queue.Empty:
                 self.chat.idle(0.2)
 
-    def confirm(self, question):
-        answer = self.ask(question, ["Yes, go ahead", "No, cancel"], allow_text=False)
-        return bool(answer and answer.get("choices") == ["Yes, go ahead"])
+    def confirm(self, question, category=None):
+        """Yes/No card. With a category, "Yes, for the rest of this task" skips later asks of the same kind."""
+        if category and category in self.allowed:
+            return True
+        options = ["Yes, go ahead"] + (["Yes, for the rest of this task"] if category else []) + ["No, cancel"]
+        answer = self.ask(question, options, allow_text=False)
+        picked = (answer or {}).get("choices") or []
+        if picked == ["Yes, for the rest of this task"]:
+            self.allowed.add(category)
+        return bool(picked) and picked[0].startswith("Yes")
 
 
 def session(tasks, log, status, stop, on_ready, on_idle, mirror=None, mirror_wanted=None, answer=None,
-            say=None, ask=None):
+            say=None, ask=None, hands_on=None):
     """Open the chat once, then run tasks from the queue until it yields None."""
     facts = {}
     threading.Thread(target=lambda: facts.setdefault("system", sysinfo.collect("system")), daemon=True).start()
     chat = copilot_chat.CopilotChat(status, log, stop, mirror, mirror_wanted)
-    tools = Tools(chat, log, stop, say, ask)
+    tools = Tools(chat, log, stop, say, ask, hands_on)
     try:
         status("Preparing chat")
         chat.open()
@@ -70,6 +80,7 @@ def session(tasks, log, status, stop, on_ready, on_idle, mirror=None, mirror_wan
             if task is None:
                 return
             stop.clear()
+            tools.allowed.clear()
             started = time.time()
             outcome = {"answer": "Not finished"}
 
@@ -106,11 +117,21 @@ def session(tasks, log, status, stop, on_ready, on_idle, mirror=None, mirror_wan
 
 def _drive(task, chat, log, status, stop, instructed, system_facts, answer, tools):
     report = None
+    shot = None          # last screenshot Copilot saw; clicks are mapped against it
+    want_shot = False    # set by look, or after mouse/keyboard actions
+    hands_on = False
     for round_no in range(1, MAX_ROUNDS + 1):
         if stop.is_set():
             raise copilot_chat.Stopped()
         status(f"Step {round_no}")
-        shot = desktop.screenshot()
+        jpeg = None
+        if want_shot:
+            shot = desktop.screenshot()
+            jpeg = shot.jpeg
+            seen = f"Screenshot attached: {shot.sent_w} x {shot.sent_h} pixels. Monitors: {shot.layout()}."
+        else:
+            seen = "No screenshot attached (use look if you need to see the screen)."
+        want_shot = False
         if report is None:
             head = protocol.NEXT_TASK if instructed else protocol.INSTRUCTION
             facts = ""
@@ -118,13 +139,12 @@ def _drive(task, chat, log, status, stop, instructed, system_facts, answer, tool
                 facts = f"\nThis PC:\n{system_facts}\n" if system_facts else ""
                 past = sysinfo.recent_history(5)
                 facts += f"\nRecent Co-opilot tasks (oldest first; inspect history for more):\n{past}\n" if past else ""
-            text = (f"{head}{facts}\nTask:\n{task}\nScreenshot: {shot.sent_w} x {shot.sent_h} pixels. "
-                    f"Monitors: {shot.layout()}.")
+            text = f"{head}{facts}\nTask:\n{task}\n{seen}"
         else:
-            report.update(width=shot.sent_w, height=shot.sent_h, monitors=shot.layout())
+            report["screen"] = seen
             text = _fit(report)
-        log(f"Step {round_no}: sending")
-        reply = chat.send(text, shot.jpeg, ready=_complete)
+        log(f"Step {round_no}: sending{' with screenshot' if jpeg else ''}")
+        reply = chat.send(text, jpeg, ready=_complete)
         _log_reply(log, reply)
         actions = protocol.parse_actions(reply.text, reply.code_blocks)
         if actions is None:
@@ -145,6 +165,29 @@ def _drive(task, chat, log, status, stop, instructed, system_facts, answer, tool
                 answer(action["summary"] or "Done.")
                 status("Done")
                 return
+            if action["action"] == "look":
+                want_shot = True
+                report["ran"].append(action)
+                continue
+            verdict = safety.review(action, desktop.foreground_title())
+            if verdict[0] == "block":
+                report.update(ok=False, error=f"Blocked by the safety check, not run: {verdict[1]}")
+                log(f"Blocked: {verdict[1]}")
+                break
+            if verdict[0] == "confirm" and not tools.confirm(verdict[2], verdict[1]):
+                report.update(ok=False, error=f"The user declined: {verdict[2].splitlines()[0]} Nothing was done.")
+                log(f"Declined: {verdict[2].splitlines()[0]}")
+                break
+            visible = action["action"] in protocol.VISIBLE
+            if visible and shot is None and action["action"] in _NEEDS_COORDS:
+                report.update(ok=False, error=f"{action['action']} needs coordinates from a screenshot; use look first.")
+                break
+            if visible:
+                want_shot = True
+                if not hands_on:
+                    hands_on = True
+                    tools.hands_on()
+                    time.sleep(0.4)
             try:
                 if action["action"] == "inspect":
                     output = sysinfo.collect(action["topic"])
@@ -173,6 +216,7 @@ def _drive(task, chat, log, status, stop, instructed, system_facts, answer, tool
 
 
 _SKILLS = {"list_dir", "read_file", "write_file", "ado", "say", "ask"}
+_NEEDS_COORDS = {"click", "double_click", "right_click", "move", "drag", "scroll"}
 
 
 def _skill(action, tools):

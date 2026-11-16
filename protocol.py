@@ -42,6 +42,10 @@ FLOW = """How to work (be smart, not busy):
 4. Prefer direct skills over clicking: read_file/write_file for files, ado for Azure DevOps, open_url/open_path to open.
 5. After acting, verify (read it back, ado get, or look at the screenshot), then done with what changed and where.
 6. If something fails, read the error in the report, adjust, and retry a different way once before giving up.
+Safety: never delete, send, submit, purchase, uninstall, change security or system settings, or run commands unless the task
+clearly asks for it; when it does, use ask to confirm first. A safety check also reviews every action: some are blocked
+outright and some need the user's approval. If the report says an action was blocked or declined, do not retry it another
+way; explain in done what you did not do and why.
 """
 
 SKILLS = """Files: list_dir {"path"}; read_file {"path","sheet"?} reads text, csv, json, Excel (.xlsx) and Word (.docx);
@@ -68,15 +72,24 @@ one sentence answer first, then a "- " bullet per item on its own line, **bold**
 Example: "You have **2** Edge windows open.\n## Window 1\n- **Intranet**\n- **Timesheets**\n## Window 2\n- **Dashboard**"
 """
 
-INSTRUCTION = f"""You control this Windows PC and help diagnose it. Each message includes a screenshot.
+INSTRUCTION = f"""You are Co-opilot, an assistant that can also operate and diagnose this Windows PC.
 Reply with exactly one fenced json object and no other text:
 {{"actions":[ ...1 to {MAX_BATCH} actions... ]}}
+First decide what the task really needs:
+- Just an answer (a question, writing, explaining, advice, or the user's Microsoft 365 data): reply with only done and put the
+  full answer in summary. Do not touch the PC.
+- Facts or files from this PC: use the invisible skills (inspect, list_dir, read_file, write_file, ado, read_clipboard).
+  They run in the background without the user noticing.
+- Only when a task truly needs the screen, mouse, or keyboard: use look to get a screenshot, then act on it.
+  The mouse and keyboard take over the user's PC and show a "hands off" overlay, so use them as little as possible.
+There is no screenshot until you use look; after mouse or keyboard actions a new one comes automatically.
 Batch actions that do not need a new screenshot in between, for example open_app then type then key.
 The screenshot shows every monitor side by side; each message lists which pixel ranges belong to which monitor.
 Coordinates are pixels of the attached screenshot, origin at its top-left, and can point at any monitor.
 After the batch you get a JSON report (what ran, errors, inspect and read results) and a new screenshot.
 
 Actions:
+{{"action":"look"}}
 {{"action":"click","x":0,"y":0}}
 {{"action":"double_click","x":0,"y":0}}
 {{"action":"right_click","x":0,"y":0}}
@@ -120,6 +133,7 @@ When the task is finished, put done last in the batch.
 """
 
 NEXT_TASK = (f"New task. Same rules as before: one fenced json object with up to {MAX_BATCH} actions, done when finished.\n"
+             "If it is just a question, answer with only done. Use look only if the screen is really needed.\n"
              f"{SUMMARY_RULE}")
 
 REMINDER = 'Reply with only one fenced json object like {"actions":[...]} for the next step. No other text.'
@@ -127,9 +141,12 @@ REMINDER = 'Reply with only one fenced json object like {"actions":[...]} for th
 _POINT_ACTIONS = {"click", "double_click", "right_click", "move"}
 _ACTIONS = _POINT_ACTIONS | {"type", "key", "scroll", "open_app", "focus", "inspect", "wait", "done",
                              "drag", "open_url", "open_path", "window", "read_clipboard",
-                             "list_dir", "read_file", "write_file", "ado", "say", "ask"}
+                             "list_dir", "read_file", "write_file", "ado", "say", "ask", "look"}
 # These end a batch: the next step depends on what they return.
-_ENDS_BATCH = {"done", "ask"}
+_ENDS_BATCH = {"done", "ask", "look"}
+# Mouse and keyboard actions: they take over the user's PC, so the overlay shows and a screenshot is needed.
+VISIBLE = {"click", "double_click", "right_click", "move", "drag", "type", "key", "scroll", "open_app", "focus",
+           "window", "open_url", "open_path"}
 _DIRECTIONS = {"up", "down", "left", "right"}
 _WAIT_CAP_MS = 10_000
 
@@ -244,7 +261,7 @@ def _validate(obj):
         if op.strip().lower() not in WINDOW_OPS:
             return None
         return {"action": action, "title": title.strip(), "op": op.strip().lower()}
-    if action == "read_clipboard":
+    if action in ("read_clipboard", "look"):
         return {"action": action}
     if action in ("list_dir", "read_file", "write_file"):
         path = obj.get("path")
