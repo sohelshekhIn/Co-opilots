@@ -149,7 +149,7 @@ class Ado:
         status, text = response["status"], response["text"]
         if status in (203, 302, 401) or text.lstrip().startswith("<"):
             raise RuntimeError("Azure DevOps did not accept the browser sign-in. Open the project in the "
-                               "Co-opilot browser once (Show sign-in) or check the URL.")
+                               "Copilot Assistant browser once (Show sign-in) or check the URL.")
         data = json.loads(text) if text else {}
         if status >= 400:
             raise RuntimeError(f"Azure DevOps {status}: {data.get('message', text[:300])}")

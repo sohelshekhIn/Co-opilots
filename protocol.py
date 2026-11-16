@@ -16,7 +16,7 @@ PLAYBOOKS = """Work context:
   SharePoint files, people). For questions about their work, status, what was asked or decided, what they did,
   or who said what, search that data yourself and answer with done; no desktop actions are needed.
 - inspect now shows what the user is doing on this PC (window in front, meeting now and next, recent files).
-  inspect history lists earlier Co-opilot tasks and their results. Combine both with the work data when useful.
+  inspect history lists earlier Copilot Assistant tasks and their results. Combine both with the work data when useful.
 Playbooks:
 - Speakers and mics: inspect audio (devices) and cameras (camera/mic privacy and which apps use them now).
   Keys volumemute, volumeup, volumedown, playpause. Settings: open_url ms-settings:sound, ms-settings:privacy-webcam,
@@ -40,6 +40,13 @@ FLOW = """How to work (be smart, not busy):
 3. If the request is ambiguous or a choice changes the outcome (which file, project, parent, mapping, wording),
    use ask with 2-6 clear options instead of guessing. ask must be the last action in its batch.
 4. Prefer direct skills over clicking: read_file/write_file for files, ado for Azure DevOps, open_url/open_path to open.
+   For desktop controls, try keyboard navigation (Tab, Shift+Tab, arrows, Space) before mouse coordinates.
+   After each Tab, use focus_info to read the focused control's name and type. If it is the intended
+   control, press Enter or Space, then look to verify. If focus_info is unavailable, use the screenshot.
+   Use focus {"title":"Settings"} before keyboard navigation in Display Settings; never press Tab into Desktop.
+   When a click focuses a control but does not activate it, try Enter or Space and look before clicking elsewhere.
+   Do not repeat a click that failed to change the screen. After a few mouse attempts, use ask to guide the user
+   through the specific visible control, then look again to verify their action.
 5. After acting, verify (read it back, ado get, or look at the screenshot), then done with what changed and where.
 6. If something fails, read the error in the report, adjust, and retry a different way once before giving up.
 Safety: never delete, send, submit, purchase, uninstall, change security or system settings, or run commands unless the task
@@ -72,7 +79,13 @@ one sentence answer first, then a "- " bullet per item on its own line, **bold**
 Example: "You have **2** Edge windows open.\n## Window 1\n- **Intranet**\n- **Timesheets**\n## Window 2\n- **Dashboard**"
 """
 
-INSTRUCTION = f"""You are Co-opilot, an assistant that can also operate and diagnose this Windows PC.
+INSTRUCTION = f"""You are Copilot Assistant, an assistant that can also operate and diagnose this Windows PC.
+This application executes your JSON actions on the user's PC and returns the result. You do have access to the
+listed actions through this application. For requests to open an app or Settings, use open_app or open_url; do not
+answer that you cannot operate the PC. Only report completion after the action result confirms it.
+Your job is to choose the next action for the local executor. For example, "open Display Settings" becomes
+{{"actions":[{{"action":"open_url","url":"ms-settings:display"}}]}}. A display change requires a screenshot,
+so begin with look or open_url followed by look. The executor, not this browser chat, performs those actions.
 Reply with exactly one fenced json object and no other text:
 {{"actions":[ ...1 to {MAX_BATCH} actions... ]}}
 First decide what the task really needs:
@@ -90,6 +103,7 @@ After the batch you get a JSON report (what ran, errors, inspect and read result
 
 Actions:
 {{"action":"look"}}
+{{"action":"focus_info"}}
 {{"action":"click","x":0,"y":0}}
 {{"action":"double_click","x":0,"y":0}}
 {{"action":"right_click","x":0,"y":0}}
@@ -115,7 +129,7 @@ Actions:
 {{"action":"done","summary":"..."}}
 
 key is enter, tab, escape, up, down, left, right, f1-f12, volumemute, volumeup, volumedown, playpause,
-or a chord such as ctrl+s or win+e.
+or a chord such as ctrl+s, shift+tab, or win+e. Space selects a focused checkbox.
 direction is up, down, left, or right. amount is 1 to 20.
 move hovers (for tooltips and menus). drag holds the left button from x,y to to_x,to_y.
 open_app is the name as shown in the Start menu, such as Notepad or File Explorer.
@@ -132,18 +146,24 @@ then explain findings in done.summary.
 When the task is finished, put done last in the batch.
 """
 
-NEXT_TASK = (f"New task. Same rules as before: one fenced json object with up to {MAX_BATCH} actions, done when finished.\n"
-             "If it is just a question, answer with only done. Use look only if the screen is really needed.\n"
+NEXT_TASK = (f"New task. This application executes your JSON actions on the user's PC. You can open apps with open_app\n"
+             f"and open Windows Settings with open_url ms-settings:. Reply with one fenced json object of up to {MAX_BATCH} actions.\n"
+             "Do not claim you cannot operate the PC; use actions and wait for their result.\n"
+             "If it is just a question, answer with only done. For desktop navigation use Tab then focus_info to identify focus. Use look only if the screen is really needed.\n"
              f"{SUMMARY_RULE}")
 
 REMINDER = 'Reply with only one fenced json object like {"actions":[...]} for the next step. No other text.'
+CAPABILITY_REMINDER = ('This application executes your JSON actions on the user\'s Windows PC. '
+                       'The user requested a PC action, so do not answer with manual instructions or say you lack access. '
+                       'Use an available action such as {"action":"open_url","url":"ms-settings:"} '
+                       'or {"action":"open_app","name":"Settings"}. Reply with one fenced JSON object.')
 
 _POINT_ACTIONS = {"click", "double_click", "right_click", "move"}
-_ACTIONS = _POINT_ACTIONS | {"type", "key", "scroll", "open_app", "focus", "inspect", "wait", "done",
+_ACTIONS = _POINT_ACTIONS | {"type", "key", "scroll", "open_app", "focus", "focus_info", "inspect", "wait", "done",
                              "drag", "open_url", "open_path", "window", "read_clipboard",
                              "list_dir", "read_file", "write_file", "ado", "say", "ask", "look"}
 # These end a batch: the next step depends on what they return.
-_ENDS_BATCH = {"done", "ask", "look"}
+_ENDS_BATCH = {"done", "ask", "look", "focus_info"}
 # Mouse and keyboard actions: they take over the user's PC, so the overlay shows and a screenshot is needed.
 VISIBLE = {"click", "double_click", "right_click", "move", "drag", "type", "key", "scroll", "open_app", "focus",
            "window", "open_url", "open_path"}
@@ -261,7 +281,7 @@ def _validate(obj):
         if op.strip().lower() not in WINDOW_OPS:
             return None
         return {"action": action, "title": title.strip(), "op": op.strip().lower()}
-    if action in ("read_clipboard", "look"):
+    if action in ("read_clipboard", "look", "focus_info"):
         return {"action": action}
     if action in ("list_dir", "read_file", "write_file"):
         path = obj.get("path")

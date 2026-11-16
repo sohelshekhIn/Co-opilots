@@ -70,7 +70,7 @@ def _front_windows(count=3):
         title = window.title.strip()
         if (not title or not window.visible or window.isMinimized or pid.value == me
                 or "Chrome for Testing" in title
-                or title in ("Co-opilot", "Developer log", "Program Manager", "Windows Input Experience")):
+                or title in ("Copilot Assistant", "Co-opilot", "Developer log", "Program Manager", "Windows Input Experience")):
             continue
         number = desktop.window_monitor(window, screens)
         if number:
@@ -224,7 +224,7 @@ def collect(topic):
                         if w.title.strip() and w.visible and "Chrome for Testing" not in w.title})
         return _clip("\n".join(lines))
     if topic == "history":
-        return _clip(recent_history(30) or "No earlier Co-opilot tasks yet.")
+        return _clip(recent_history(30) or "No earlier Copilot Assistant tasks yet.")
     if topic == "now":
         front = "\n".join(["Windows in front (top first):", *_front_windows()])
         return _clip(front + "\n" + _powershell("now", _NOW))
