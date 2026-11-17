@@ -19,11 +19,12 @@ try { $o = [Runtime.InteropServices.Marshal]::GetActiveObject('Outlook.Applicati
 if ($o) {
   $items = $o.GetNamespace('MAPI').GetDefaultFolder(9).Items; $items.IncludeRecurrences = $true; $items.Sort('[Start]')
   $now = Get-Date; $current = @(); $next = $null
-  foreach ($m in $items.Restrict("[End] > '$($now.ToString('g'))' AND [Start] < '$($now.Date.AddDays(1).ToString('g'))'")) {
+  $until = $now.Date.AddDays(14)
+  foreach ($m in $items.Restrict("[End] > '$($now.ToString('g'))' AND [Start] < '$($until.ToString('g'))'")) {
     if ($m.AllDayEvent) { continue }
     if ($m.Start -le $now) { $current += $m } elseif (-not $next) { $next = $m; break } }
   if ($current) { $current | ForEach-Object { "Meeting now: {0} ({1:HH:mm}-{2:HH:mm})" -f $_.Subject, $_.Start, $_.End } } else { "Meeting now: none" }
-  if ($next) { "Next meeting: {0} at {1:HH:mm} (in {2:N0} min)" -f $next.Subject, $next.Start, ($next.Start - $now).TotalMinutes } else { "Next meeting: none today" }
+  if ($next) { "Next meeting: {0} at {1:ddd HH:mm} (in {2:N0} min)" -f $next.Subject, $next.Start, ($next.Start - $now).TotalMinutes } else { "Next meeting: none in the next 14 days" }
 } else { "Calendar: classic Outlook is not running" }
 "Recently opened files:"
 Get-ChildItem "$env:APPDATA\Microsoft\Windows\Recent" -Filter *.lnk -ErrorAction SilentlyContinue |
