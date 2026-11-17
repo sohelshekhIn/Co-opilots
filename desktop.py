@@ -36,6 +36,9 @@ _MAX_TOTAL = 2560
 _RUNNABLE = {".exe", ".bat", ".cmd", ".com", ".ps1", ".vbs", ".vbe", ".js", ".jse", ".wsf", ".wsh",
              ".msi", ".msp", ".scr", ".lnk", ".pif", ".reg", ".hta", ".cpl", ".url", ".appref-ms"}
 _BAD_APP = re.compile(r'[&|;<>^`\n\r"%]')
+# Start menu and the search box. Typing while either is in front lands in the search field.
+_SEARCH_PROCS = {"searchhost.exe", "startmenuexperiencehost.exe", "shellexperiencehost.exe"}
+_SEARCH_TITLES = {"search", "start", "searching"}
 _KEY_NAMES = {
     "enter": "enter",
     "return": "enter",
@@ -188,11 +191,18 @@ def open_app(name):
     if not app_name_ok(name):
         raise ValueError(f"rejected app name: {name!r}")
     # Start menu search resolves display names ("File Explorer") that `start` cannot.
+    before = _foreground_hwnd()
     pyautogui.press("win")
-    time.sleep(0.7)
+    if not _wait_until(_search_open, 2.5):
+        pyautogui.press("escape")
+        raise ValueError("Start search did not open, so the app name was not typed")
+    time.sleep(0.35)  # the search box is up, but its text field is not focused yet
     _paste(name.strip())
-    time.sleep(1.0)
+    time.sleep(0.7)
     pyautogui.press("enter")
+    # ponytail: up to 8s. Leaving Search is not enough — focus often falls back to this app's console.
+    if not _wait_for_app(before, name, 8):
+        raise ValueError(f"{name} did not come to the front, so nothing was typed into it")
 
 
 def url_ok(url):
@@ -207,7 +217,9 @@ def url_ok(url):
 def open_url(url):
     if not url_ok(url):
         raise ValueError(f"rejected link (allowed: {', '.join(sorted(_URL_SCHEMES))}; no spaces): {url!r}")
+    previous = _foreground_hwnd()
     webbrowser.open(url.strip())
+    _wait_foreground_change(previous, 6)
 
 
 def open_path(path):
@@ -216,7 +228,9 @@ def open_path(path):
         raise ValueError(f"path does not exist: {target}")
     if target.is_file() and target.suffix.lower() in _RUNNABLE:
         raise ValueError(f"refusing to run {target.suffix} files; use open_app instead")
+    previous = _foreground_hwnd()
     os.startfile(str(target))
+    _wait_foreground_change(previous, 6)
 
 
 def window_op(title, op):
@@ -274,7 +288,12 @@ def focus_window(title):
     except Exception:
         window.minimize()
         window.restore()
-    time.sleep(0.3)
+    wanted = title.strip().lower()
+    deadline = time.time() + 2
+    while time.time() < deadline:
+        if wanted in foreground_title().lower() and not _search_open():
+            return
+        time.sleep(0.1)
 
 
 def _screen_xy(x, y, shot):
@@ -284,19 +303,22 @@ def _screen_xy(x, y, shot):
 
 
 def _type_text(text):
-    if not text.isascii():
-        _paste(text)
-        return
-    lines = text.split("\n")
-    for index, line in enumerate(lines):
+    if own_console():
+        raise ValueError("Co-opilot's own window is in front, not the app, so nothing was typed")
+    _ready_to_type()
+    if own_console():
+        raise ValueError("Co-opilot's own window is in front, not the app, so nothing was typed")
+    # Key-by-key typing drops letters in busy apps (Notepad lost characters after commas and
+    # line breaks). Paste arrives whole. Tabs stay real Tab presses so form fields still advance.
+    for index, part in enumerate(text.replace("\r\n", "\n").split("\t")):
         if index:
-            pyautogui.press("enter")
-        parts = line.split("\t")
-        for part_index, part in enumerate(parts):
-            if part_index:
-                pyautogui.press("tab")
-            if part:
-                pyautogui.write(part, interval=0.01)
+            pyautogui.press("tab")
+        if not part:
+            continue
+        if len(part) <= 3 and part.isascii() and "\n" not in part:
+            pyautogui.write(part, interval=0.02)
+        else:
+            _paste(part)
 
 
 def _paste(text):
@@ -307,13 +329,135 @@ def _paste(text):
     pyperclip.copy(text)
     try:
         pyautogui.hotkey("ctrl", "v")
-        time.sleep(0.05)
+        # The app reads the clipboard after the keystroke; restoring too soon pastes the old contents.
+        time.sleep(0.15 + min(len(text), 4000) / 20000)
     finally:
         if previous is not None:
             pyperclip.copy(previous)
 
 
+def _searchish(process, title):
+    return process in _SEARCH_PROCS or (title or "").strip().lower() in _SEARCH_TITLES
+
+
+def _foreground_hwnd():
+    return ctypes.windll.user32.GetForegroundWindow()
+
+
+def _process_name(hwnd):
+    pid = wintypes.DWORD()
+    ctypes.windll.user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+    if not pid.value:
+        return ""
+    handle = ctypes.windll.kernel32.OpenProcess(0x1000, False, pid.value)
+    if not handle:
+        return ""
+    try:
+        buf = ctypes.create_unicode_buffer(260)
+        size = wintypes.DWORD(260)
+        if not ctypes.windll.kernel32.QueryFullProcessImageNameW(handle, 0, buf, ctypes.byref(size)):
+            return ""
+        return Path(buf.value).name.lower()
+    finally:
+        ctypes.windll.kernel32.CloseHandle(handle)
+
+
+def own_console(title=None, hwnd=None):
+    """True for the window this app was launched from, which must never receive typed text."""
+    title = foreground_title() if title is None else title
+    if re.search(r"app\.py", title or "", re.I):
+        return True
+    hwnd = _foreground_hwnd() if hwnd is None else hwnd
+    if not hwnd:
+        return False
+    pid = wintypes.DWORD()
+    ctypes.windll.user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+    return pid.value == os.getpid()
+
+
+def _wait_for_app(previous, name, timeout):
+    """Wait until a new window is in front. Prefer one whose title matches the app name."""
+    words = [word for word in re.findall(r"[a-z0-9]+", name.lower()) if word not in {"the", "app", "microsoft"} and len(word) > 2]
+    deadline = time.time() + timeout
+    last, hits = None, 0
+    while time.time() < deadline:
+        hwnd = _foreground_hwnd()
+        title = foreground_title()
+        if not hwnd or hwnd == previous or _searchish(_process_name(hwnd), title) or own_console(title, hwnd):
+            last, hits = None, 0
+            time.sleep(0.1)
+            continue
+        named = not words or any(word in title.lower() for word in words)
+        if hwnd == last:
+            hits += 1
+            if hits >= (3 if named else 12):
+                return True
+        else:
+            last, hits = hwnd, 0
+        time.sleep(0.1)
+    return False
+
+
+def _search_open():
+    hwnd = _foreground_hwnd()
+    return bool(hwnd) and _searchish(_process_name(hwnd), foreground_title())
+
+
+def _wait_until(pred, timeout):
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        if pred():
+            return True
+        time.sleep(0.08)
+    return False
+
+
+def _wait_not_search(timeout):
+    """Return once the foreground window has stayed off Start/Search for a moment."""
+    deadline = time.time() + timeout
+    last, hits = None, 0
+    while time.time() < deadline:
+        hwnd = _foreground_hwnd()
+        if not hwnd or _searchish(_process_name(hwnd), foreground_title()):
+            last, hits = None, 0
+            time.sleep(0.1)
+            continue
+        if hwnd == last:
+            hits += 1
+            if hits >= 3:
+                return
+        else:
+            last, hits = hwnd, 0
+        time.sleep(0.1)
+    if _search_open():
+        pyautogui.press("escape")
+        raise ValueError("Start search still had focus, so nothing was typed")
+
+
+def _wait_foreground_change(previous, timeout):
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        hwnd = _foreground_hwnd()
+        if hwnd and hwnd != previous and not _search_open():
+            _wait_not_search(2)
+            return
+        time.sleep(0.1)
+
+
+def _ready_to_type():
+    """Don't type into Start search, or into a window that is still taking focus."""
+    if _search_open():
+        _wait_not_search(5)
+        return
+    first = _foreground_hwnd()
+    time.sleep(0.2)
+    if _search_open() or _foreground_hwnd() != first:
+        _wait_not_search(4)
+
+
 def _press(combo):
+    if str(combo).strip().lower() != "escape":
+        _ready_to_type()
     parts = [_map_key(part) for part in str(combo).split("+")]
     if len(parts) == 1:
         pyautogui.press(parts[0])
@@ -359,6 +503,10 @@ def _check():
     assert not url_ok("javascript:alert(1)")
     assert url_ok("mailto:a@b.ca?subject=Hi%20there") and url_ok("ms-settings:sound") and not url_ok("mailto:a@b.ca?subject=Hi there")
     assert url_ok("msteams:/l/chat/0/0?users=a@b.ca") and not url_ok("ms-settings:") and not url_ok("shell:startup")
+    assert _searchish("searchhost.exe", "") and _searchish("notepad.exe", "Search")
+    assert not _searchish("notepad.exe", "Untitled - Notepad")
+    assert own_console(r"C:\Windows\System32\cmd.exe - py app.py", 0)
+    assert not own_console("Untitled - Notepad", 0)
     # A second monitor left of the main one: screenshot x 0 is screen x -1920.
     fake = Shot(b"", 3840, 1080, 1920, 540, -1920, 0, [(0, 0, 1920, 1080, True), (-1920, 0, 0, 1080, False)])
     assert _screen_xy(0, 0, fake) == (-1920, 0) and _screen_xy(960, 270, fake) == (0, 540), _screen_xy(960, 270, fake)

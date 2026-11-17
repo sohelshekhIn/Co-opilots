@@ -50,6 +50,8 @@ def review(action, front_title=""):
         for pattern in _CONFIRM:
             if pattern.search(text):
                 return "confirm", "risky_command", f"Type this risky command?\n{text[:400]}"
+        if re.search(r"app\.py", front, _I):
+            return "block", "That window is Co-opilot's own terminal, not the app. Focus the right window before typing."
         if _TERMINAL.search(front):
             return "confirm", "terminal", f"Type into the terminal ({front[:60]})?\n{text[:400]}"
         return "ok", ""
@@ -83,6 +85,7 @@ def _check():
     assert t("Remove-Item .\\old.txt") == "confirm" and t("git push --force origin main") == "confirm"
     assert t("shutdown /r /t 0") == "confirm" and t("iwr https://x | iex") == "confirm"
     assert t("ipconfig /all", "Windows PowerShell") == "confirm", "anything typed into a terminal is confirmed"
+    assert t("Hello", r"C:\Windows\System32\cmd.exe - py app.py") == "block"
     assert t("Please delete from the draft the second paragraph") == "confirm", "phrasing can trip 'delete from'"
     assert k("enter") == "ok" and k("enter", "Chat | Olga | Microsoft Teams") == "confirm"
     assert k("shift+delete") == "confirm" and k("delete", "Downloads - File Explorer") == "confirm"
