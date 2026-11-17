@@ -173,6 +173,10 @@ def session(tasks, log, status, stop, on_ready, on_idle, mirror=None, mirror_wan
                 try:
                     status("New chat")
                     chat._new_chat()
+                    chat._go_temporary()
+                    status("Selecting GPT model")
+                    if not chat._select_model():
+                        log(f"Could not verify {copilot_chat.PREFERRED_MODEL}; keeping the current model")
                 except Exception as exc:
                     log(f"New chat: {exc}")
                 status("Ready")
@@ -189,7 +193,9 @@ def session(tasks, log, status, stop, on_ready, on_idle, mirror=None, mirror_wan
                 (answer or log)(text)
 
             try:
-                if _drive(task, chat, log, status, stop, instructed, facts, answered, tools) is not False:
+                if _local_open(task, log, status, answered):
+                    pass
+                elif _drive(task, chat, log, status, stop, instructed, facts, answered, tools) is not False:
                     instructed = True
             except Skipped:
                 log("Skipped")
@@ -254,6 +260,12 @@ def _drive(task, chat, log, status, stop, instructed, facts, answer, tools):
     want_shot = False    # set by look, or after mouse/keyboard actions
     hands_on = False
     tried = False        # any tool ran in this task; a refusal before that gets one nudge
+    mouse_actions = 0
+    keyboard_navigation = 0
+    last_mouse_target = None
+    keyboard_window = None
+    display_target = re.search(r"monitor\s*(\d+)", task, re.I)
+    display_focus = None
     for round_no in range(1, MAX_ROUNDS + 1):
         if stop.is_set():
             raise copilot_chat.Stopped()
@@ -275,7 +287,10 @@ def _drive(task, chat, log, status, stop, instructed, facts, answer, tools):
                 past = sysinfo.recent_history(5)
                 known += f"\nRecent Co-opilot tasks (oldest first; inspect history for more):\n{past}\n" if past else ""
             transcript = meetings.for_question(task, tools.memory.last_account)
-            text = f"{head}{known}\n{tools.memory.block()}{transcript}Task:\n{task}\n{seen}"
+            mode = ("\nFor desktop tasks, try Tab, Shift+Tab, arrows, and Enter before mouse coordinates. "
+                    "After each Tab, use focus_info. After at most three mouse actions, ask the user to do the one "
+                    "visible step, then look again.\n")
+            text = f"{head}{known}\n{tools.memory.block()}{transcript}{mode}Task:\n{task}\n{seen}"
         else:
             report["screen"] = seen
             report["task"] = task[:300]
@@ -360,6 +375,33 @@ def _drive(task, chat, log, status, stop, instructed, facts, answer, tools):
                 report["ran"].append(action)
                 tried = True
                 continue
+            if action["action"] in _NEEDS_COORDS and keyboard_navigation < 2:
+                report.update(ok=False, error=(
+                    "Keyboard navigation is required before mouse coordinates. Use key Tab or Shift+Tab "
+                    "and Enter or Space, then focus_info. Mouse actions are available after two keyboard steps."
+                ))
+                log("Blocked mouse action: keyboard navigation has not been tried")
+                break
+            if action["action"] in _NEEDS_COORDS and display_target and display_focus and display_focus != display_target.group(1):
+                report.update(ok=False, error=(
+                    f"Keyboard focus is on Display {display_focus}; the requested target is Display {display_target.group(1)}. "
+                    "Use Tab or Shift+Tab, call focus_info, then press Enter on the target."
+                ))
+                log("Blocked mouse action while the target display is reachable by keyboard")
+                break
+            if action["action"] in _NEEDS_COORDS and shot is not None:
+                target = desktop._screen_xy(action["x"], action["y"], shot)
+                if last_mouse_target and abs(target[0] - last_mouse_target[0]) < 24 and abs(target[1] - last_mouse_target[1]) < 24:
+                    report.update(ok=False, error="That click was already tried. Use the keyboard, or ask which control to use.")
+                    log("Blocked a repeated mouse target")
+                    break
+            if action["action"] in _NEEDS_COORDS and mouse_actions >= 3:
+                report.update(ok=False, error=(
+                    "Mouse action limit reached. If the control is focused, press Enter or Space, then look. "
+                    "Otherwise use ask and name the visible control."
+                ))
+                log("Mouse limit reached")
+                break
             verdict = safety.review(action, desktop.foreground_title())
             if verdict[0] == "block":
                 report.update(ok=False, error=f"Blocked by the safety check, not run: {verdict[1]}")
@@ -375,12 +417,23 @@ def _drive(task, chat, log, status, stop, instructed, facts, answer, tools):
                 break
             if visible:
                 want_shot = True
+                if action["action"] == "key" and action["key"] in ("tab", "shift+tab", "enter", "space", "up", "down", "left", "right"):
+                    keyboard_navigation += 1
+                if action["action"] in _NEEDS_COORDS and shot is not None:
+                    mouse_actions += 1
+                    last_mouse_target = desktop._screen_xy(action["x"], action["y"], shot)
                 if not hands_on:
                     hands_on = True
                     tools.hands_on()
                     time.sleep(0.4)
             try:
-                if action["action"] == "inspect":
+                if action["action"] == "focus_info":
+                    output = desktop.focused_control()
+                    focused_display = re.search(r"focused:\s*ListItem\s+Display\s+(\d+)", output, re.I)
+                    display_focus = focused_display.group(1) if focused_display else display_focus
+                    report["results"].append({"topic": "focus_info", "output": output})
+                    log(output)
+                elif action["action"] == "inspect":
                     output = sysinfo.collect(action["topic"])
                     report["results"].append({"topic": action["topic"], "output": output})
                     log(f"inspect {action['topic']}: {len(output)} chars")
@@ -391,7 +444,13 @@ def _drive(task, chat, log, status, stop, instructed, facts, answer, tools):
                         report["results"].append({"topic": action["action"], "output": output})
                         log(f"{action['action']}: {len(str(output))} chars")
                 else:
+                    if action["action"] == "key" and keyboard_window:
+                        if keyboard_window.lower() not in desktop.foreground_title().lower():
+                            desktop.focus_window(keyboard_window)
+                            log(f"Focused {keyboard_window} before the key")
                     output = desktop.run(action, shot)
+                    if action["action"] == "open_url" and str(action.get("url", "")).startswith("ms-settings:"):
+                        keyboard_window = "Settings"
                     if output is not None:
                         report["results"].append({"topic": action["action"], "output": output})
                     time.sleep(_SETTLE)
@@ -411,6 +470,22 @@ def _drive(task, chat, log, status, stop, instructed, facts, answer, tools):
 
 _SKILLS = {"list_dir", "read_file", "write_file", "ado", "say", "ask", "account"}
 _NEEDS_COORDS = {"click", "double_click", "right_click", "move", "drag", "scroll"}
+
+
+def _local_open(task, log, status, answer):
+    """Open Settings directly when the request names nothing else."""
+    request = re.sub(r"[?.!]+$", "", task.strip().lower())
+    if re.fullmatch(r"(?:can you |please )?open (?:windows )?settings(?: please)?", request):
+        uri, label = "ms-settings:", "Settings"
+    elif re.fullmatch(r"(?:can you |please )?open (?:windows )?display settings(?: please)?", request):
+        uri, label = "ms-settings:display", "Display Settings"
+    else:
+        return False
+    log(f"Local action: opening {uri}")
+    desktop.open_url(uri)
+    answer(f"Opened {label}.")
+    status("Done")
+    return True
 
 
 def _skill(action, tools):
@@ -496,6 +571,7 @@ def _check():
     assert _REFUSE.search("Sorry, I don't have access to your calendar.")
     assert not _REFUSE.search("Your PC cannot reach the VPN because the adapter is disabled.")
     assert _facts_text({"system": "PC"}, type("S", (), {"is_set": lambda self: False})()) == "PC"
+    assert _local_open("what time is it", lambda *_: None, lambda *_: None, lambda *_: None) is False
     print("loop ok")
 
 

@@ -29,6 +29,20 @@ from PIL import Image, ImageGrab
 pyautogui.FAILSAFE = True
 pyautogui.PAUSE = 0.05
 
+
+def focused_control():
+    """Read the current Windows UI Automation focus without changing it."""
+    try:
+        from pywinauto.uia_defines import IUIA
+        from pywinauto.uia_element_info import UIAElementInfo
+        element = UIAElementInfo(IUIA().iuia.GetFocusedElement())
+        name = element.name or "(unnamed)"
+        kind = element.control_type or "control"
+        identifier = element.automation_id or ""
+        return f"Active window: {foreground_title() or '(untitled)'}; focused: {kind} {name}; automation id: {identifier}"
+    except Exception as exc:
+        return f"Focused control unavailable: {exc}"
+
 # Long edge of the JPEG sent to Copilot, per monitor side by side, up to _MAX_TOTAL.
 _MAX_EDGE = 1280
 _MAX_TOTAL = 2560
@@ -211,6 +225,10 @@ def url_ok(url):
     parts = urllib.parse.urlsplit(url.strip())
     if parts.scheme not in _URL_SCHEMES:
         return False
+    # Windows URI handlers such as ms-settings: are valid without a host or
+    # path (the bare scheme opens the Settings home page).
+    if parts.scheme == "ms-settings" and not parts.netloc and not parts.path:
+        return True
     return bool(parts.netloc) if parts.scheme in ("http", "https") else bool(parts.netloc or parts.path)
 
 
@@ -294,6 +312,7 @@ def focus_window(title):
         if wanted in foreground_title().lower() and not _search_open():
             return
         time.sleep(0.1)
+    raise RuntimeError(f"could not focus {title!r}; active window is {foreground_title()!r}")
 
 
 def _screen_xy(x, y, shot):
@@ -502,7 +521,7 @@ def _check():
     assert url_ok("https://example.com/a?b=1") and not url_ok("file:///C:/x") and not url_ok("https://a b")
     assert not url_ok("javascript:alert(1)")
     assert url_ok("mailto:a@b.ca?subject=Hi%20there") and url_ok("ms-settings:sound") and not url_ok("mailto:a@b.ca?subject=Hi there")
-    assert url_ok("msteams:/l/chat/0/0?users=a@b.ca") and not url_ok("ms-settings:") and not url_ok("shell:startup")
+    assert url_ok("msteams:/l/chat/0/0?users=a@b.ca") and url_ok("ms-settings:") and not url_ok("shell:startup")
     assert _searchish("searchhost.exe", "") and _searchish("notepad.exe", "Search")
     assert not _searchish("notepad.exe", "Untitled - Notepad")
     assert own_console(r"C:\Windows\System32\cmd.exe - py app.py", 0)

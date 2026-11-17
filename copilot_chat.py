@@ -8,6 +8,7 @@ patterns below.
 """
 
 import base64
+from io import BytesIO
 import ctypes
 import os
 import re
@@ -23,6 +24,7 @@ from urllib.parse import urlparse
 import desktop
 
 CHAT_URL = "https://m365.cloud.microsoft/chat"
+PREFERRED_MODEL = "GPT (OpenAI)"
 CHAT_HOSTS = {"copilot.cloud.microsoft", "m365.cloud.microsoft"}
 LOGIN_HOSTS = {
     "login.microsoftonline.com",
@@ -367,6 +369,10 @@ class CopilotChat:
         self._wait_until_ready()
         self._new_chat()
         self._go_temporary()
+        self.status("Selecting GPT model")
+        if not self._select_model():
+            raise RuntimeError(f"Could not verify {PREFERRED_MODEL} in Microsoft Copilot")
+        self._wait_until_ready(timeout=60)
         self._hide()
 
     def _drop_taskbar_button(self):
@@ -441,7 +447,26 @@ class CopilotChat:
             return False
 
     def _attachment_count(self):
-        return self._page().get_by_role("button", name=re.compile(r"^remove attachment", _NAME)).count()
+        page = self._page()
+        selectors = (
+            '[data-testid*="attachment" i]:not(input)',
+            '[data-automationid*="attachment" i]:not(input)',
+            '[aria-label*="remove attachment" i]',
+            '[aria-label*="remove file" i]',
+            '[aria-label*="remove image" i]',
+            '[data-testid*="upload-preview" i]',
+        )
+        total = 0
+        for selector in selectors:
+            try:
+                total += page.locator(selector).count()
+            except Exception:
+                pass
+        try:
+            total += page.get_by_role("button", name=re.compile(r"remove (attachment|file|image)", _NAME)).count()
+        except Exception:
+            pass
+        return total
 
     def side_page(self):
         """A second tab in the same signed-in browser for other sites (Azure DevOps); the chat ignores it."""
@@ -508,7 +533,7 @@ class CopilotChat:
                         self._show()
                 elif self._composer() is not None:
                     self._hide()
-                    self.status("Chat ready")
+                    self.status("Chat loaded")
                     return
                 elif self._signed_out():
                     stuck_since = None
@@ -539,19 +564,43 @@ class CopilotChat:
             return False
 
     def _composer(self):
+        """Return the visible, editable Copilot composer.
+
+        Copilot has changed the composer from a role-only contenteditable to a
+        textarea/contenteditable with different aria labels over time. Do not
+        blindly select the last textbox: the page also contains hidden search,
+        navigation, and sign-in fields.
+        """
         try:
             page = self._page()
-            named = page.get_by_role(
-                "textbox",
-                name=re.compile(r"message copilot|ask copilot|ask me anything", _NAME),
-            )
-            if named.count():
-                return named.last
             if self._signed_out():
                 return None
-            loc = page.get_by_role("textbox")
-            if loc.count():
-                return loc.last
+            candidates = (
+                page.locator('[contenteditable="true"]'),
+                page.locator('textarea'),
+                page.locator('[role="textbox"]'),
+            )
+            # Prefer fields whose accessible label identifies the chat input.
+            preferred = re.compile(r"message|ask|prompt|question|copilot|anything", _NAME)
+            fallback = []
+            for loc in candidates:
+                for index in range(loc.count()):
+                    item = loc.nth(index)
+                    try:
+                        if not item.is_visible() or not item.is_editable():
+                            continue
+                        label = " ".join(filter(None, (
+                            item.get_attribute("aria-label"),
+                            item.get_attribute("placeholder"),
+                            item.get_attribute("name"),
+                        )))
+                        if preferred.search(label):
+                            return item
+                        fallback.append(item)
+                    except Exception:
+                        continue
+            if fallback:
+                return fallback[-1]
         except Exception:
             return None
         return None
@@ -627,7 +676,9 @@ class CopilotChat:
         if loc.count() == 0:
             loc = page.get_by_role("button", name=re.compile(r"new chat|nouvelle conversation|nouveau clavardage", _NAME))
         if loc.count() == 0:
-            # Narrow layouts hide the sidebar; loading CHAT_URL already opened a fresh chat.
+            # Narrow layouts hide the sidebar. The chat URL is the fallback.
+            page.goto(CHAT_URL, wait_until="domcontentloaded", timeout=60_000)
+            self._wait_until_ready(timeout=60)
             return
         loc.first.click()
         time.sleep(0.6)
@@ -649,6 +700,80 @@ class CopilotChat:
             self.log("Using a temporary chat (not saved to Recent chats)")
         else:
             self.log("Temporary chat unavailable; using a normal chat")
+
+    def _select_model(self):
+        """Choose the requested Copilot UI model if this account exposes it."""
+        page = self._page()
+        target = re.compile(r"^GPT\s+OpenAI$", _NAME)
+        try:
+            label = self._model_label()
+            if re.search(r"GPT[- ]?5\.6\s*Sol", label, _NAME):
+                self.log(f"Copilot model already selected: {label}")
+                return True
+            # The current model is usually a button showing Auto.
+            current = page.get_by_role("button", name=re.compile(r"Auto.*Model Selector|^Auto$|model selector", _NAME))
+            if not current.count():
+                self.log(f"Model selector unavailable; Copilot remains on its default (wanted {PREFERRED_MODEL})")
+                return False
+            current.first.click(timeout=3000)
+            try:
+                page.get_by_text(re.compile(r"GPT\s+OpenAI", _NAME)).first.wait_for(state="visible", timeout=5000)
+            except Exception:
+                pass
+            choice = page.get_by_role("menuitem", name=target)
+            if not choice.count():
+                choice = page.get_by_role("option", name=target)
+            if not choice.count():
+                choice = page.get_by_role("button", name=target)
+            if not choice.count():
+                choice = page.get_by_text(target, exact=False)
+            if not choice.count():
+                labels = page.evaluate("""() => [...document.querySelectorAll('[role], button, [data-testid]')]
+                    .filter(e => e.getBoundingClientRect().width > 0 && e.getBoundingClientRect().height > 0)
+                    .map(e => (e.getAttribute('aria-label') || e.innerText || '').trim())
+                    .filter(x => /auto|gpt|quick|response|model/i.test(x) && x.length < 250)
+                    .slice(0, 25)""")
+                self.log(f"Visible Copilot model labels: {labels}")
+                self.log(f"{PREFERRED_MODEL} is not offered in this Copilot chat; leaving the current model unchanged")
+                page.keyboard.press("Escape")
+                return False
+            choice.last.click(timeout=3000)
+            page.wait_for_timeout(300)
+            submenu = page.evaluate("""() => [...document.querySelectorAll('[role=menuitem], [role=option], [role=radio], button')]
+                .filter(e => e.getBoundingClientRect().width > 0 && e.getBoundingClientRect().height > 0)
+                .map(e => (e.getAttribute('aria-label') || e.innerText || '').trim())
+                .filter(x => /gpt|openai|quick response|think deeper|auto/i.test(x) && x.length < 150)
+                .slice(0, 20)""")
+            self.log(f"Model choices after GPT click: {submenu}")
+            exact_gpt = page.get_by_role("option", name=re.compile(r"GPT[- ]?5\.6.*Sol", _NAME))
+            if not exact_gpt.count():
+                exact_gpt = page.get_by_role("menuitem", name=re.compile(r"GPT[- ]?5\.6.*Sol", _NAME))
+            if not exact_gpt.count():
+                exact_gpt = page.get_by_text(re.compile(r"GPT[- ]?5\.6.*Sol", _NAME))
+            if exact_gpt.count():
+                exact_gpt.first.click(timeout=3000)
+                page.wait_for_timeout(300)
+            label = self._model_label()
+            if re.search(r"GPT[- ]?5\.6\s*Sol", label, _NAME):
+                self.log(f"Selected Copilot model: {PREFERRED_MODEL}; selector now reads {label!r}")
+                return True
+            else:
+                self.log(f"Clicked {PREFERRED_MODEL}, but selector reads {label!r}; selection not verified")
+                return False
+        except Exception as exc:
+            self.log(f"Could not select {PREFERRED_MODEL}: {exc}")
+            try:
+                page.keyboard.press("Escape")
+            except Exception:
+                pass
+            return False
+
+    def _model_label(self):
+        return self._page().evaluate("""() => {
+            const item = [...document.querySelectorAll('button')].find(e =>
+                /model selector/i.test(e.getAttribute('aria-label') || ''));
+            return item ? (item.getAttribute('aria-label') || item.innerText || '').trim() : '';
+        }""")
 
     def _click_role(self, role, pattern):
         try:
@@ -728,16 +853,39 @@ class CopilotChat:
         try:
             Path(path).write_bytes(jpeg)
             if self._set_files(path):
+                self._await_image_consent()
                 deadline = time.time() + 15
                 while self._attachment_count() == 0 and time.time() < deadline:
                     self._check_stop()
+                    if self._await_image_consent():
+                        self._set_files(path)
                     time.sleep(0.2)
-                time.sleep(0.3)
-                return
+                if self._attachment_count() > 0:
+                    self.log("Screenshot attached through file input")
+                    time.sleep(0.3)
+                    return
+                self.log("File input accepted the screenshot but Copilot showed no attachment; trying the upload control")
             page = self._page()
-            attach = page.locator('[data-testid="chat-input-attach-button"]')
+            if self._await_image_consent():
+                self._set_files(path)
+                deadline = time.time() + 10
+                while self._attachment_count() == 0 and time.time() < deadline:
+                    self._check_stop()
+                    time.sleep(0.2)
+                if self._attachment_count() > 0:
+                    self.log("Screenshot attached after image consent")
+                    return
+            attach = page.locator(
+                '[data-testid="chat-input-attach-button"], '
+                '[data-testid*="attach" i], '
+                '[data-testid*="upload" i], '
+                'button[aria-label*="attach" i], '
+                'button[aria-label*="upload" i], '
+                'button[aria-label*="image" i], '
+                'button[aria-label*="file" i]'
+            )
             if attach.count() == 0:
-                attach = page.get_by_role("button", name=re.compile(r"^add$", _NAME))
+                attach = page.get_by_role("button", name=re.compile(r"^(add|attach|upload|file|image)|add (file|image)|attach (file|image)|upload (file|image)", _NAME))
             if attach.count():
                 opened = False
                 try:
@@ -748,24 +896,97 @@ class CopilotChat:
                 except Exception:
                     opened = False
                 if opened:
-                    time.sleep(0.4)
-                    return
-                if self._choose_files("menuitem", r"this device|upload|browse|photo|file|image|cet appareil", path):
+                    deadline = time.time() + 10
+                    while self._attachment_count() == 0 and time.time() < deadline:
+                        self._check_stop()
+                        time.sleep(0.2)
+                    if self._attachment_count() > 0:
+                        self.log("Screenshot attached through the file chooser")
+                        time.sleep(0.4)
+                        return
+                if self._choose_files("menuitem", r"this device|upload|browse|photo|file|image|attach|cet appareil", path):
                     time.sleep(0.4)
                     return
                 files_tab = page.locator('[data-testid="peek-pivot-files"]')
                 if files_tab.count():
                     files_tab.first.evaluate("el => el.click()")
                     time.sleep(0.3)
-                if self._set_files(path) or self._choose_files("button", r"upload|browse|this device|add file", path):
-                    time.sleep(0.4)
-                    return
-            raise RuntimeError("Copilot has no image upload control")
+                if self._set_files(path) or self._choose_files("button", r"upload|browse|this device|add file|attach file|image", path):
+                    deadline = time.time() + 10
+                    while self._attachment_count() == 0 and time.time() < deadline:
+                        self._check_stop()
+                        time.sleep(0.2)
+                    if self._attachment_count() > 0:
+                        self.log("Screenshot attached through the upload menu")
+                        time.sleep(0.4)
+                        return
+            # Some Copilot tenants expose paste for images but no upload button.
+            # Populate the browser clipboard and paste into the chat composer.
+            try:
+                # The attachment menu may have left a Fluent dialog backdrop
+                # over the composer. Close it before attempting a paste.
+                page.keyboard.press("Escape")
+                composer = self._composer()
+                if composer is not None:
+                    from PIL import Image
+                    png = BytesIO()
+                    Image.open(BytesIO(jpeg)).save(png, format="PNG")
+                    encoded = base64.b64encode(png.getvalue()).decode("ascii")
+                    page.evaluate("""async data => {
+                        const bytes = Uint8Array.from(atob(data), c => c.charCodeAt(0));
+                        await navigator.clipboard.write([new ClipboardItem({
+                            'image/png': new Blob([bytes], {type: 'image/png'})
+                        })]);
+                    }""", encoded)
+                    composer.evaluate("el => el.focus()")
+                    composer.press("ControlOrMeta+V")
+                    deadline = time.time() + 10
+                    while self._attachment_count() == 0 and time.time() < deadline:
+                        self._check_stop()
+                        time.sleep(0.2)
+                    if self._attachment_count() > 0:
+                        self.log("Screenshot attached through clipboard paste")
+                        return
+            except Exception as exc:
+                self.log(f"Screenshot paste unavailable: {exc}")
+            try:
+                details = page.evaluate("""() => ({
+                    inputs: [...document.querySelectorAll('input[type=file]')].map(e => ({
+                        accept: e.accept, files: e.files?.length || 0
+                    })),
+                    dialogs: [...document.querySelectorAll('[role=dialog]')].map(e =>
+                        (e.innerText || '').slice(0, 160)),
+                    controls: [...document.querySelectorAll('button')].map(e =>
+                        e.getAttribute('aria-label') || e.innerText || '').filter(Boolean)
+                        .filter(x => /attach|upload|image|file|add/i.test(x)).slice(0, 12)
+                })""")
+                self.log(f"Screenshot upload diagnostics: {details}")
+            except Exception as exc:
+                self.log(f"Screenshot upload diagnostics unavailable: {exc}")
+            raise RuntimeError("Copilot did not attach the screenshot (upload and paste unavailable)")
         finally:
             try:
                 os.remove(path)
             except OSError:
                 pass
+
+    def _await_image_consent(self):
+        """Let the person decide Copilot's image processing consent prompt."""
+        page = self._page()
+        dialog = page.get_by_role("dialog").filter(has_text=re.compile(r"Before we get started", _NAME))
+        if not dialog.count():
+            return False
+        self.log("Co-opilot needs a screenshot to inspect your PC. Please review the Microsoft Copilot image-processing prompt in the browser and choose whether to accept it.")
+        self.status("Co-opilot: review Microsoft's image prompt in the browser")
+        self._show()
+        deadline = time.time() + 120
+        while dialog.count() and dialog.first.is_visible():
+            self._check_stop()
+            if time.time() >= deadline:
+                raise RuntimeError("Copilot image consent was not completed in the browser")
+            time.sleep(0.5)
+        self._hide()
+        return True
 
     def _set_files(self, path):
         target = self._pick_file_input()
@@ -800,7 +1021,7 @@ class CopilotChat:
             accept = (item.get_attribute("accept") or "").lower()
             if "image" in accept or any(ext in accept for ext in (".png", ".jpg", ".jpeg", ".gif", ".webp")):
                 return item
-            if accept == "" and blank is None:
+            if accept == "" and blank is None and item.is_visible():
                 blank = item
         return blank
 

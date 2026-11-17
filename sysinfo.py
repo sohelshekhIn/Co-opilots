@@ -71,7 +71,7 @@ def _front_windows(count=3):
         title = window.title.strip()
         if (not title or not window.visible or window.isMinimized or pid.value == me
                 or "Chrome for Testing" in title
-                or title in ("Co-opilot", "Developer log", "Program Manager", "Windows Input Experience")):
+                or title in ("Copilot Assistant", "Co-opilot", "Developer log", "Program Manager", "Windows Input Experience")):
             continue
         number = desktop.window_monitor(window, screens)
         if number:
