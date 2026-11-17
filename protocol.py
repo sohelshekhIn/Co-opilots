@@ -11,12 +11,16 @@ TOPICS = ("system", "disks", "processes", "network", "services", "events", "wind
           "startup", "battery", "updates", "printers", "displays", "audio", "cameras", "outlook", "teams",
           "now", "history")
 
-PLAYBOOKS = """Work context:
-- You can read this user's Microsoft 365 work data (email, Teams chats and meetings, calendar, OneDrive and
-  SharePoint files, people). For questions about their work, status, what was asked or decided, what they did,
-  or who said what, search that data yourself and answer with done; no desktop actions are needed.
-- inspect now shows what the user is doing on this PC (window in front, meeting now and next, recent files).
-  inspect history lists earlier Co-opilot tasks and their results. Combine both with the work data when useful.
+PLAYBOOKS = """Work account (no screen, already signed in):
+- account reads this user's Outlook and OneDrive. Use it for meetings, mail, a person, tasks, and recent work files.
+  You do not know any of that until the result comes back. Never answer these with "checking" or "looking up".
+- ops: next; agenda when=today|tomorrow|week; mail (unread, or query= a name or subject); person query=name;
+  tasks; files; me (email, title, manager); recordings (days=7, optional query= a meeting name).
+  focus for me is email, title, or manager.
+- Teams recordings: account op recordings finds the meeting on this user's calendar (a partial name is matched to the full subject),
+  then reads that meeting's Teams chat for the recording and transcript. The file is often not in their OneDrive.
+  If a transcript is included later in the message, answer from that text. Do not say it was saved to the PC.
+- inspect now is this PC (the window in front and recent local files). inspect history is earlier Co-opilot tasks.
 Playbooks:
 - Speakers and mics: inspect audio (devices) and cameras (camera/mic privacy and which apps use them now).
   Keys volumemute, volumeup, volumedown, playpause. Settings: open_url ms-settings:sound, ms-settings:privacy-webcam,
@@ -24,19 +28,22 @@ Playbooks:
 - Teams: inspect teams for health. New Teams keys: ctrl+1 Activity, ctrl+2 Chat, ctrl+3 Teams, ctrl+4 Calendar,
   ctrl+5 Calls, ctrl+e search, ctrl+n new chat. In a call: ctrl+shift+m mute, ctrl+shift+o camera, ctrl+shift+k raise hand,
   ctrl+shift+h leave. Chat with someone: open_url msteams:/l/chat/0/0?users=name@example.com then focus Teams.
-- Outlook: inspect outlook for unread mail and today's meetings (classic Outlook only; otherwise read the screen).
+- Outlook: use account to read mail and the calendar. The screen is only for sending, replying, or clicking.
   New email: open_url mailto:a@b.ca?subject=Hello%20there&body=Line%20one (percent-encode spaces and new lines as %0A).
   Keys: ctrl+1 Mail, ctrl+2 Calendar, ctrl+shift+m new email, ctrl+r reply, f9 send/receive, ctrl+enter send.
 - Before sending a message or email, joining, starting or leaving a call, accepting or declining a meeting, or deleting
   anything: only do it if the task explicitly asks for that. Otherwise prepare it and say it is ready for the user to send.
 """
 WINDOW_OPS = ("minimize", "maximize", "restore", "move_to_main")
+ACCOUNT_OPS = ("next", "agenda", "mail", "person", "tasks", "files", "me", "recordings")
+ACCOUNT_WHEN = ("today", "tomorrow", "week")
+ACCOUNT_FOCUS = ("email", "title", "manager")
 ADO_OPS = ("get", "query", "create", "update", "comment", "import_excel")
 WRITE_MODES = ("create", "append", "overwrite")
 
 FLOW = """How to work (be smart, not busy):
 1. For anything beyond one step, start the first batch with say: a 1-3 line plan.
-2. Gather facts before acting: inspect, list_dir, read_file, ado get/query, your Microsoft 365 data, the screenshot.
+2. Gather facts before acting: account for their mailbox and calendar, inspect, list_dir, read_file, ado get/query, the screenshot.
 3. If the request is ambiguous or a choice changes the outcome (which file, project, parent, mapping, wording),
    use ask with 2-6 clear options instead of guessing. ask must be the last action in its batch.
 4. Prefer direct skills over clicking: read_file/write_file for files, ado for Azure DevOps, open_url/open_path to open.
@@ -51,6 +58,10 @@ way; explain in done what you did not do and why.
 SKILLS = """Files: list_dir {"path"}; read_file {"path","sheet"?} reads text, csv, json, Excel (.xlsx) and Word (.docx);
 write_file {"path","content"} for text or {"path","rows":[[...],...]} for .xlsx/.csv, "mode": create (default), append,
 or overwrite (the user is asked to confirm). Paths may use %USERPROFILE%, %ONEDRIVE%, or ~.
+.pdf takes a full HTML page as content (style it; draw charts and diagrams as inline <svg>); .docx takes text with
+"# " and "## " headings and "- " bullets. Put new files in %USERPROFILE%\\Documents unless the user names a folder.
+A file exists only after write_file reports "wrote". Never say you made, attached, or saved a file otherwise.
+The user sees every written file under your answer with Open and Show in folder, so do not paste the path again.
 Azure DevOps: {"action":"ado","op":...,"project":"https://dev.azure.com/<org>/<project>"} (project is remembered after the
 first success; if unknown, ask the user for it). ops:
 - get {"id"} item with fields, description, acceptance criteria, parent and children
@@ -61,6 +72,10 @@ first success; if unknown, ask the user for it). ops:
   user approves a preview. Read the file first, then map every header to a field or "skip".
 Field names: title, description, acceptance_criteria, tags ("a; b"), state, assigned_to, area, iteration, priority,
 effort, story_points, or any reference name such as Custom.Team.
+Account (Outlook and OneDrive, no screen): {"action":"account","op":"next"|"agenda"|"mail"|"person"|"tasks"|"files"|"me"|"recordings"}.
+agenda takes "when": today, tomorrow, or week. mail and person take "query". me takes "focus": email, title, or manager.
+recordings takes "days" (1 to 30, default 7) and optional "query" (a partial meeting name). It matches the calendar, then reads that meeting's Teams chat.
+This is the only way to read their meetings, mail, work files, and recordings. Wait for the result; do not guess it.
 Talking to the user: say {"text"} posts a short progress note and continues;
 ask {"question","options":["..."],"multi":false,"allow_text":true} shows a card with radio buttons (or checkboxes when multi)
 and a details box, then waits; the answer comes back in the report.
@@ -70,18 +85,28 @@ SUMMARY_RULE = r"""done.summary is shown to the user as formatted text. Format i
 one sentence answer first, then a "- " bullet per item on its own line, **bold** for names, `code` for paths or commands,
 "## " for a heading when there are groups. Never put a list inside one sentence or separate items with commas.
 Example: "You have **2** Edge windows open.\n## Window 1\n- **Intranet**\n- **Timesheets**\n## Window 2\n- **Dashboard**"
+Never say you are checking or looking something up. The first sentence is the fact.
+A timetable, fare, score, opening hours, or any number that changes through the day must be read from the live page
+(open_url, then look) before you state it. Never from memory. End with a source line the user can open:
+"Source: [page name](https://...), checked at H:MM." If the page will not open, say so and do not guess the number.
 """
 
 INSTRUCTION = f"""You are Co-opilot, an assistant that can also operate and diagnose this Windows PC.
 Reply with exactly one fenced json object and no other text:
 {{"actions":[ ...1 to {MAX_BATCH} actions... ]}}
-First decide what the task really needs:
-- Just an answer (a question, writing, explaining, advice, or the user's Microsoft 365 data): reply with only done and put the
-  full answer in summary. Do not touch the PC.
-- Facts or files from this PC: use the invisible skills (inspect, list_dir, read_file, write_file, ado, read_clipboard).
+First decide what the task really needs. The goal is to actually finish it, the way the user meant it:
+- Just an answer (a question, writing, explaining, or advice) that is not about this user's mailbox, calendar, or files, and that does not depend on a live page: reply with only done and put the full answer in summary. Do not touch the PC.
+- A timetable, fare, score, opening hours, or anything that changes through the day: open the official page, read it, then answer from what you read and cite it. Never guess a time or a price.
+- This user's meetings, mail, people, tasks, work files, or meeting recordings and transcripts: use account, then done with the actual names and times from that result. Never from memory.
+- Facts or files from this PC: use the invisible skills (inspect, list_dir, read_file, write_file, ado, read_clipboard, account).
   They run in the background without the user noticing.
-- Only when a task truly needs the screen, mouse, or keyboard: use look to get a screenshot, then act on it.
-  The mouse and keyboard take over the user's PC and show a "hands off" overlay, so use them as little as possible.
+- Anything that changes or creates something in an app (book or block calendar time, send, reply, fill a form, click in an
+  app, open and type) needs the screen: use look, act, and verify on the next screenshot. The background skills only read.
+  Do not stop at a partial background answer when the user asked you to do something.
+- Pick the fastest path that really works: background skills first when they fully cover the task, then the screen.
+- Never say you can't access something before trying the tool for it (account covers calendar, mail, people, tasks,
+  OneDrive files, and Teams meeting recordings and transcripts; the screen covers any app). Only if no tool or app on
+  this PC can do it, reply with only done and one polite sentence saying so, without starting actions.
 There is no screenshot until you use look; after mouse or keyboard actions a new one comes automatically.
 Batch actions that do not need a new screenshot in between, for example open_app then type then key.
 The screenshot shows every monitor side by side; each message lists which pixel ranges belong to which monitor.
@@ -105,6 +130,7 @@ Actions:
 {{"action":"window","title":"part of a window title","op":"maximize"}}
 {{"action":"read_clipboard"}}
 {{"action":"inspect","topic":"system"}}
+{{"action":"account","op":"next"}}
 {{"action":"list_dir","path":"%USERPROFILE%\\\\Documents"}}
 {{"action":"read_file","path":"C:\\\\path\\\\file.xlsx"}}
 {{"action":"write_file","path":"C:\\\\path\\\\out.txt","content":"..."}}
@@ -133,7 +159,13 @@ When the task is finished, put done last in the batch.
 """
 
 NEXT_TASK = (f"New task. Same rules as before: one fenced json object with up to {MAX_BATCH} actions, done when finished.\n"
-             "If it is just a question, answer with only done. Use look only if the screen is really needed.\n"
+             "A conversation so far may be included; the new message can refer to it.\n"
+             "If it is just a question and the answer cannot go stale, answer with only done. If it is a timetable, fare, or anything that changes through the day, open the official page and cite it; never guess. If it is about this user's meetings, mail, people, "
+             "tasks, files, or recordings, use account first and answer from that result. Never say you are checking or looking "
+             "something up. If a meeting transcript is included, answer from that text. To change or create something "
+             "in an app, use the screen (look, act, verify). Background skills only read.\n"
+             "Never say you can't access something before trying its tool. Only if nothing on this PC can do it, "
+             "reply with only done and one polite sentence.\n"
              f"{SUMMARY_RULE}")
 
 REMINDER = 'Reply with only one fenced json object like {"actions":[...]} for the next step. No other text.'
@@ -141,9 +173,9 @@ REMINDER = 'Reply with only one fenced json object like {"actions":[...]} for th
 _POINT_ACTIONS = {"click", "double_click", "right_click", "move"}
 _ACTIONS = _POINT_ACTIONS | {"type", "key", "scroll", "open_app", "focus", "inspect", "wait", "done",
                              "drag", "open_url", "open_path", "window", "read_clipboard",
-                             "list_dir", "read_file", "write_file", "ado", "say", "ask", "look"}
+                             "list_dir", "read_file", "write_file", "ado", "say", "ask", "look", "account"}
 # These end a batch: the next step depends on what they return.
-_ENDS_BATCH = {"done", "ask", "look"}
+_ENDS_BATCH = {"done", "ask", "look", "account"}
 # Mouse and keyboard actions: they take over the user's PC, so the overlay shows and a screenshot is needed.
 VISIBLE = {"click", "double_click", "right_click", "move", "drag", "type", "key", "scroll", "open_app", "focus",
            "window", "open_url", "open_path"}
@@ -295,6 +327,8 @@ def _validate(obj):
             return None
         return {"action": action, "question": obj["question"].strip(), "options": options,
                 "multi": obj.get("multi") is True, "allow_text": allow_text}
+    if action == "account":
+        return _validate_account(obj)
     if action == "ado":
         return _validate_ado(obj)
     if action == "type":
@@ -339,6 +373,37 @@ def _validate(obj):
     return {"action": "done", "summary": summary}
 
 
+def _validate_account(obj):
+    op = str(obj.get("op") or "").strip().lower()
+    if op not in ACCOUNT_OPS:
+        return None
+    out = {"action": "account", "op": op}
+    if op == "agenda":
+        when = str(obj.get("when") or "today").strip().lower()
+        if when not in ACCOUNT_WHEN:
+            return None
+        out["when"] = when
+    if op == "me":
+        focus = str(obj.get("focus") or "").strip().lower()
+        if focus and focus not in ACCOUNT_FOCUS:
+            return None
+        if focus:
+            out["focus"] = focus
+    if op in ("mail", "person") and _text(obj.get("query"), 80):
+        out["query"] = " ".join(obj["query"].split())
+    if op == "person" and "query" not in out:
+        return None
+    if op == "recordings":
+        if obj.get("days") is not None:
+            days = _num(obj.get("days"))
+            if days is None or not 1 <= days <= 30:
+                return None
+            out["days"] = days
+        if _text(obj.get("query"), 80):
+            out["query"] = " ".join(obj["query"].split())
+    return out
+
+
 def _validate_ado(obj):
     op = str(obj.get("op") or "").strip().lower()
     if op not in ADO_OPS:
@@ -378,6 +443,7 @@ def _num(value):
 
 
 def _check():
+    assert "Source:" in INSTRUCTION and "open the official page" in NEXT_TASK
     click = parse_actions("Next step.", [("json", '{"action":"click","x":1,"y":2}')])
     assert click == [{"action": "click", "x": 1, "y": 2}], click
     assert parse_actions("Just prose, no json.", []) is None
@@ -419,6 +485,16 @@ def _check():
     assert imp == [{"action": "ado", "op": "import_excel", "parent": 123, "type": "Product Backlog Item",
                     "file": "x.xlsx", "columns": {"Name": "title"}}], imp
     assert parse_actions("", [("json", '{"action":"ado","op":"delete","id":5}')]) is None
+    fetched = parse_actions("", [("json", '{"actions":[{"action":"account","op":"next"},{"action":"done","summary":"Checking"}]}')])
+    assert fetched == [{"action": "account", "op": "next"}], fetched
+    assert parse_actions("", [("json", '{"action":"account","op":"agenda","when":"tomorrow"}')]) == [
+        {"action": "account", "op": "agenda", "when": "tomorrow"}]
+    assert parse_actions("", [("json", '{"action":"account","op":"person"}')]) is None
+    assert parse_actions("", [("json", '{"action":"account","op":"me","focus":"manager"}')]) == [
+        {"action": "account", "op": "me", "focus": "manager"}]
+    assert parse_actions("", [("json", '{"action":"account","op":"recordings","days":7}')]) == [
+        {"action": "account", "op": "recordings", "days": 7}]
+    assert parse_actions("", [("json", '{"action":"account","op":"recordings","days":90}')]) is None
     assert parse_actions("", [("json", '{"action":"write_file","path":"a.txt","content":"x","mode":"nuke"}')]) is None
     print("protocol ok")
 
