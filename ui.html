@@ -1,0 +1,619 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="color-scheme" content="light dark">
+<title>Co-opilot</title>
+<style>
+:root{
+  --bg:#f3f3f1;--card:#fff;--hover:#e9e9e6;--ink:#111;--muted:#5c5c5a;--rule:#d9d9d5;--red:#c4161c;--red-ink:#fff;
+  --sel:#cfe0ff;--code:#ebebe7;
+  --sans:"Segoe UI Variable Text","Segoe UI",system-ui,sans-serif;
+  --display:"Segoe UI Variable Display","Segoe UI",system-ui,sans-serif;
+  --mono:"Cascadia Mono",Consolas,monospace;
+  --ease:cubic-bezier(.16,1,.3,1);
+  --accent:#3c6e71;
+  /* ponytail: derived from one picked colour; mixing toward --ink keeps text readable in both themes for most picks */
+  --acc-ink:color-mix(in srgb,var(--accent) 62%,var(--ink));
+  --acc-strong:color-mix(in srgb,var(--accent) 72%,#000);
+  --acc-soft:color-mix(in srgb,var(--accent) 13%,transparent);
+  --acc-line:color-mix(in srgb,var(--accent) 50%,var(--rule));
+  --z:1;
+  --gutter:max(18px,calc((100vw / var(--z) - 880px) / 2));
+  color-scheme:light;
+}
+@media (prefers-color-scheme:dark){:root:not([data-theme=light]){
+  --bg:#0e0e0e;--card:#171717;--hover:#1f1f1f;--ink:#ececec;--muted:#a0a0a0;--rule:#2b2b2b;--red:#ff453a;--red-ink:#160303;
+  --sel:#2d4a7a;--code:#232323;color-scheme:dark;
+}}
+:root[data-theme=dark]{
+  --bg:#0e0e0e;--card:#171717;--hover:#1f1f1f;--ink:#ececec;--muted:#a0a0a0;--rule:#2b2b2b;--red:#ff453a;--red-ink:#160303;
+  --sel:#2d4a7a;--code:#232323;color-scheme:dark;
+}
+:root[data-text=large]{--z:1.12}
+:root[data-text=larger]{--z:1.25}
+*{box-sizing:border-box;margin:0;padding:0}
+html,body{height:100%}
+body{zoom:var(--z);height:calc(100vh / var(--z));font:14px/1.5 var(--sans);color:var(--ink);display:flex;flex-direction:column;overflow:hidden;
+  background:var(--bg);
+  -webkit-font-smoothing:antialiased;font-variant-numeric:tabular-nums}
+::selection{background:color-mix(in srgb,var(--accent) 30%,transparent);color:var(--ink)}
+::-webkit-scrollbar{width:10px}
+::-webkit-scrollbar-thumb{background:var(--rule);border-radius:5px;border:3px solid var(--bg)}
+::-webkit-scrollbar-thumb:hover{background:var(--accent)}
+:focus-visible{outline:2px solid var(--accent);outline-offset:2px;border-radius:4px}
+button{font:inherit;color:inherit;background:none;border:0;cursor:pointer}
+button:disabled{cursor:default;opacity:.45}
+svg{display:block;flex:none}
+[hidden],#start.off{display:none!important}
+.sr{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0);white-space:nowrap}
+kbd{font:12px var(--mono);color:var(--muted);border:1px solid var(--rule);border-radius:3px;padding:0 5px;background:var(--card)}
+
+/* header */
+header{display:flex;align-items:center;gap:8px;padding:12px var(--gutter);border-bottom:1px solid var(--rule);box-shadow:inset 0 2px 0 var(--accent)}
+header h1{font:600 15px var(--display);letter-spacing:-.01em;margin-right:6px}
+.state{display:flex;align-items:center;gap:7px;min-width:0;font-size:12.5px;color:var(--muted)}
+.state span{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.state i{width:7px;height:7px;background:var(--muted);flex:none}
+.icon{width:30px;padding:0;justify-content:center}
+.state[data-s=ready] i{background:var(--accent)}
+.state[data-s=working] i,.state[data-s=error] i{background:var(--red)}
+.state[data-s=working] i{animation:beat 1.2s var(--ease) infinite}
+.state[data-s=error]{color:var(--red)}
+@keyframes beat{50%{opacity:.25}}
+.btn{display:inline-flex;align-items:center;gap:6px;height:30px;padding:0 12px;border:1px solid var(--rule);border-radius:4px;
+  background:var(--card);font-size:13px;transition:background .15s}
+.btn:hover:not(:disabled){background:var(--acc-soft);border-color:var(--acc-line)}
+.btn.primary{background:var(--acc-strong);color:#fff;border-color:var(--acc-strong);font-weight:600}
+.btn.primary:hover:not(:disabled){opacity:.88;background:var(--acc-strong)}
+.btn.stop{background:var(--red);border-color:var(--red);color:var(--red-ink);font-weight:600}
+.btn.stop:hover{opacity:.9;background:var(--red)}
+header .state{margin-right:auto}
+
+/* glance */
+.glance{border-bottom:1px solid var(--rule)}
+.glance-bar{display:flex;align-items:center;justify-content:space-between;width:100%;padding:8px var(--gutter);font-size:13px;text-align:left}
+.glance-bar svg{transition:transform .2s var(--ease)}
+.glance.collapsed .glance-bar svg{transform:rotate(-90deg)}
+.glance-grid{display:grid;grid-template-columns:1.45fr 1fr 1fr;padding:0 calc(var(--gutter) - 18px)}
+.glance.collapsed .glance-grid{display:none}
+.cell{display:block;text-align:left;padding:12px 18px 11px;min-width:0;transition:background .15s}
+.cell+.cell{border-left:1px solid var(--rule)}
+.cell.home{grid-column:1 / -1;border-left:0;border-top:1px solid var(--rule)}
+.cell:hover{background:var(--acc-soft)}
+.cell .k{font-size:12px;color:var(--acc-ink);font-weight:600}
+.cell .v{display:block;font:600 30px/1.1 var(--display);letter-spacing:-.02em;margin:6px 0 4px;white-space:nowrap}
+.cell .v.soon{color:var(--red)}
+.cell .v.dim{color:var(--muted);font-weight:400}
+.cell .s{display:block;font-size:12.5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+
+/* main */
+main{flex:1;overflow-y:auto;padding:8px 0 16px;scroll-behavior:smooth}
+.row{display:grid;grid-template-columns:92px minmax(0,1fr);gap:0 8px;padding:10px var(--gutter) 2px}
+.row>.who{font-size:12px;font-weight:600;color:var(--acc-ink);padding-top:8px}
+.task{display:flex;align-items:center;gap:12px;width:100%;text-align:left;padding:8px 10px;border-radius:4px;font-size:14px;transition:background .15s}
+.task:hover{background:var(--acc-soft)}
+.task:hover small{color:var(--acc-ink)}
+.task span{flex:1;min-width:0}
+.task small{font-size:12px;color:var(--muted)}
+.task kbd{opacity:0;transition:opacity .15s}
+.task:hover kbd,.task:focus-visible kbd{opacity:1}
+
+.turn{animation:rise .5s var(--ease) both}
+@keyframes rise{from{opacity:0;transform:translateY(6px)}}
+.body{position:relative;margin:2px 0 8px;padding:10px 12px;min-width:0;overflow-wrap:anywhere;user-select:text;
+  background:var(--card);border:1px solid color-mix(in srgb,var(--ink) 24%,transparent);border-radius:6px}
+.body .msg p:last-child{margin-bottom:0}
+.body a{color:var(--acc-ink);text-underline-offset:3px}
+.copy{position:absolute;top:6px;right:6px;font-size:12px;color:var(--muted);background:var(--bg);
+  border:1px solid var(--rule);border-radius:4px;padding:2px 8px;opacity:0}
+.body:hover .copy,.copy:focus-visible{opacity:1}
+.body p{margin:0 0 6px;max-width:68ch}
+.body p.h{font:600 15px var(--display);margin:12px 0 4px}
+.body p.li{padding-left:16px;position:relative}
+.body p.li::before{content:"";position:absolute;left:3px;top:.68em;width:5px;height:5px;background:var(--accent)}
+.body p.ol{padding-left:16px}
+.body code{font:12.5px var(--mono);background:var(--code);padding:1px 5px;border-radius:3px}
+.body strong{font-weight:600}
+.body.you{font-size:15px}
+.body.err{color:var(--red)}
+.body.note{color:var(--muted)}
+.steps{list-style:none;padding:4px 0 0}
+.step{display:flex;align-items:center;gap:10px;padding:5px 10px;border-radius:4px;color:var(--muted);font-size:13.5px}
+.step.now{color:var(--ink);background:var(--card);box-shadow:inset 2px 0 0 var(--accent)}
+.spin{color:var(--accent)}
+.step svg{width:14px;height:14px}
+.spin{animation:spin .9s linear infinite}
+@keyframes spin{to{transform:rotate(360deg)}}
+.files{list-style:none;display:grid;gap:6px;margin:2px 0 8px}
+.file{display:grid;grid-template-columns:minmax(0,1fr);gap:2px;padding:10px 12px;background:var(--card);
+  border:1px solid var(--acc-line);border-left:3px solid var(--accent);border-radius:6px}
+.fname{display:flex;align-items:center;gap:8px;text-align:left;font-weight:600;min-width:0}
+.fname span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.fname:hover span{text-decoration:underline;text-underline-offset:3px}
+.ext{font:600 10.5px var(--mono);color:#fff;background:var(--acc-strong);border-radius:3px;padding:2px 5px;flex:none}
+.fmeta{font-size:12px;color:var(--muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.facts{display:flex;flex-wrap:wrap;gap:6px;margin-top:6px}
+.facts .btn{height:26px;padding:0 10px;font-size:12.5px}
+.took{font:12px var(--mono);color:var(--muted);padding:2px 10px 0}
+
+/* ask card */
+.ask{margin:6px 0 4px;border:1px solid var(--acc-line);border-top:2px solid var(--accent);border-radius:6px;background:var(--card);padding:14px 16px}
+.ask legend{font-weight:600;font-size:14.5px;padding:0;margin-bottom:8px;float:left;width:100%}
+.ask label.opt{display:flex;gap:10px;align-items:flex-start;padding:6px 8px;margin:0 -8px;border-radius:4px;cursor:pointer}
+.ask label.opt:hover{background:var(--hover)}
+.ask input[type=radio],.ask input[type=checkbox]{accent-color:var(--accent);width:16px;height:16px;margin-top:2px;flex:none}
+.ask .lbl{display:block;font-size:12px;color:var(--muted);margin:10px 0 4px}
+.ask textarea{width:100%;min-height:56px;resize:vertical;font:14px var(--sans);color:var(--ink);background:var(--bg);
+  border:1px solid var(--rule);border-radius:4px;padding:8px 10px}
+.ask textarea:focus{outline:none;border-color:var(--accent)}
+.ask .acts{display:flex;justify-content:flex-end;gap:8px;margin-top:12px}
+.ask .msg{font-size:12.5px;color:var(--red);margin-top:8px}
+.ask.closed{border-color:var(--rule)}
+.ask.closed .acts{display:none}
+.ask .result{font-size:13px;color:var(--muted);margin-top:8px}
+
+/* composer */
+.composer{margin:0 calc(var(--gutter) - 6px);background:var(--card);border:1px solid var(--rule);border-radius:6px;padding:10px 12px 10px 14px;transition:border-color .15s}
+.composer:focus-within{border-color:var(--accent);box-shadow:0 0 0 3px var(--acc-soft)}
+.composer textarea{display:block;width:100%;border:0;outline:0;resize:none;background:transparent;color:var(--ink);
+  font:15px/1.45 var(--sans);min-height:44px;max-height:160px;caret-color:var(--accent)}
+.composer textarea::placeholder{color:var(--muted)}
+.crow{display:flex;align-items:center;gap:10px;margin-top:6px}
+.switch{display:flex;align-items:center;gap:8px;font-size:13px;color:var(--muted);cursor:pointer;user-select:none}
+.switch input{appearance:none;width:30px;height:16px;border:1px solid var(--muted);border-radius:8px;position:relative;cursor:pointer;margin:0;transition:background .15s,border-color .15s}
+.switch input::after{content:"";position:absolute;left:2px;top:2px;width:10px;height:10px;border-radius:50%;background:var(--muted);transition:transform .2s var(--ease),background .15s}
+.switch input:checked{background:var(--accent);border-color:var(--accent)}
+.switch input:checked::after{transform:translateX(14px);background:#fff}
+.crow .btn{margin-left:auto}
+.bar{display:flex;gap:16px;padding:9px var(--gutter) 11px;font-size:12px;color:var(--muted);flex-wrap:wrap}
+.bar kbd{margin-right:5px}
+
+/* settings */
+#settings{flex:1;overflow-y:auto;padding:8px 0 24px}
+.set-head{display:flex;align-items:center;justify-content:space-between;padding:18px var(--gutter) 6px}
+#settings h2{font:600 22px var(--display);letter-spacing:-.02em}
+.set{display:grid;grid-template-columns:150px minmax(0,1fr);gap:0 16px;padding:16px var(--gutter);border-bottom:1px solid var(--rule)}
+.set>h3{font-size:13px;font-weight:600;color:var(--acc-ink);padding-top:6px}
+.opt-row{display:flex;align-items:center;justify-content:space-between;gap:16px;padding:6px 0;min-height:40px}
+.opt-row+.opt-row{border-top:1px solid var(--rule)}
+.opt-row p{font-size:14px}
+.opt-row p small{display:block;font-size:12.5px;color:var(--muted)}
+.seg{display:inline-flex;border:1px solid var(--rule);border-radius:4px;overflow:hidden;flex:none}
+.seg label{position:relative}
+.seg input{position:absolute;opacity:0;inset:0;margin:0;cursor:pointer}
+.seg span{display:block;padding:5px 12px;font-size:13px;background:var(--card)}
+.seg label+label span{border-left:1px solid var(--rule)}
+.seg input:checked+span{background:var(--acc-strong);color:#fff;font-weight:600}
+.seg input:focus-visible+span{outline:2px solid var(--accent);outline-offset:-4px}
+select,.set input[type=text],.set input:not([type]){font:13px var(--sans);color:var(--ink);background:var(--card);border:1px solid var(--rule);border-radius:4px;height:30px;padding:0 8px;flex:none;width:11rem}
+.swatches{display:flex;gap:6px;flex:none}
+.swatches label{position:relative;cursor:pointer}
+.swatches input{position:absolute;opacity:0;inset:0;margin:0;cursor:pointer}
+.swatches i{display:block;width:22px;height:22px;border-radius:50%;background:var(--c);box-shadow:0 0 0 2px var(--bg);transition:box-shadow .15s}
+.swatches input:checked+i{box-shadow:0 0 0 2px var(--bg),0 0 0 4px var(--c)}
+.swatches input:focus-visible+i{outline:2px solid var(--ink);outline-offset:4px}
+.saved{font-size:12.5px;color:var(--muted);padding:12px var(--gutter) 0;min-height:30px}
+
+/* developer log */
+#log{position:fixed;inset:auto 0 0 0;height:55%;background:var(--card);border-top:2px solid var(--accent);display:flex;flex-direction:column;
+  transform:translateY(100%);visibility:hidden;transition:transform .35s var(--ease),visibility 0s .35s}
+#log.open{transform:none;visibility:visible;transition:transform .35s var(--ease)}
+#log header{border-bottom:1px solid var(--rule)}
+#log pre{flex:1;overflow:auto;padding:10px 18px;font:12px/1.55 var(--mono);white-space:pre-wrap;word-break:break-word}
+#log .e{color:var(--red)}
+@media (prefers-reduced-motion:reduce){*,*::before,*::after{animation:none!important;transition:none!important;scroll-behavior:auto!important}}
+@media (forced-colors:active){.state i,.body p.li::before{forced-color-adjust:none;background:CanvasText}}
+</style>
+</head>
+<body>
+<header>
+  <h1>Co-opilot</h1>
+  <p class="state" id="state" data-s="busy" role="status"><i></i><span id="stateText">Starting</span></p>
+  <button class="btn icon" id="setBtn" type="button" aria-label="Settings" title="Settings (Ctrl+,)" aria-expanded="false" aria-controls="settings">
+    <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" aria-hidden="true"><path d="M2 4.5h7M12 4.5h2M2 11.5h2M7 11.5h7"/><circle cx="10.5" cy="4.5" r="1.6"/><circle cx="5.5" cy="11.5" r="1.6"/></svg></button>
+  <button class="btn" id="newBtn" type="button" disabled>
+    <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path d="M8 3v10M3 8h10"/></svg>
+    New chat</button>
+  <button class="btn stop" id="stopBtn" type="button" hidden>
+    <svg width="12" height="12" viewBox="0 0 16 16" aria-hidden="true"><rect x="3" y="3" width="10" height="10" fill="currentColor"/></svg>
+    Stop</button>
+</header>
+
+<section class="glance" id="glance" aria-label="Today at a glance">
+  <button class="glance-bar" id="glanceBar" type="button" hidden aria-expanded="true" aria-controls="glanceGrid">
+    <span id="glanceSum">Today</span>
+    <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><path d="M4 6l4 4 4-4"/></svg></button>
+  <div class="glance-grid" id="glanceGrid">
+    <button class="cell" type="button" data-ask="What's my next meeting?" id="gNext">
+      <span class="k">Next meeting</span><span class="v dim">&ndash;</span><span class="s">Checking your calendar</span></button>
+    <button class="cell" type="button" data-ask="Summarise my unread mail" id="gMail">
+      <span class="k">Unread mail</span><span class="v dim">&ndash;</span><span class="s">&nbsp;</span></button>
+    <button class="cell" type="button" data-ask="What's on my calendar today?" id="gFree">
+      <span class="k">Free today</span><span class="v dim">&ndash;</span><span class="s">&nbsp;</span></button>
+    <button class="cell home" type="button" id="gHome" hidden data-ask="">
+      <span class="k">Home</span><span class="v dim">&ndash;</span><span class="s"></span></button>
+  </div>
+</section>
+
+<main id="main" aria-label="Conversation">
+  <div id="start">
+    <div class="row"><span class="who">Your day</span><div>
+      <button class="task" type="button"><span>What's on my calendar tomorrow?</span><small>Calendar</small><kbd>Ctrl 1</kbd></button>
+      <button class="task" type="button"><span>Summarise my unread mail</span><small>Outlook</small><kbd>Ctrl 2</kbd></button>
+      <button class="task" type="button"><span>What's on my to-do list?</span><small>Tasks</small><kbd>Ctrl 3</kbd></button></div></div>
+    <div class="row"><span class="who">Meetings</span><div>
+      <button class="task" type="button"><span>What was decided in my last recorded meeting?</span><small>Teams</small><kbd>Ctrl 4</kbd></button></div></div>
+    <div class="row"><span class="who">This PC</span><div>
+      <button class="task" type="button"><span>Write a short poem in Notepad</span><small>Uses your screen</small><kbd>Ctrl 5</kbd></button>
+      <button class="task" type="button"><span>Why is my PC slow?</span><small>PC health</small><kbd>Ctrl 6</kbd></button></div></div>
+  </div>
+  <div id="convo" aria-live="polite" aria-relevant="additions"></div>
+</main>
+
+<section id="settings" hidden aria-labelledby="setTitle">
+  <div class="set-head"><h2 id="setTitle" tabindex="-1">Settings</h2><button class="btn primary" type="button" id="setDone">Done</button></div>
+  <form id="setForm">
+    <div class="set"><h3>Appearance</h3><div>
+      <div class="opt-row"><p id="themeL">Theme</p>
+        <div class="seg" role="radiogroup" aria-labelledby="themeL">
+          <label><input type="radio" name="theme" value="system"><span>System</span></label>
+          <label><input type="radio" name="theme" value="light"><span>Light</span></label>
+          <label><input type="radio" name="theme" value="dark"><span>Dark</span></label></div></div>
+      <div class="opt-row"><p id="accLbl">Accent<small>Used for labels, buttons, switches and focus.</small></p>
+        <div class="swatches" role="radiogroup" aria-labelledby="accLbl">
+          <label title="Teal"><input type="radio" name="accent" value="#3c6e71" aria-label="Teal"><i style="--c:#3c6e71"></i></label>
+          <label title="Blue"><input type="radio" name="accent" value="#2f5fd0" aria-label="Blue"><i style="--c:#2f5fd0"></i></label>
+          <label title="Indigo"><input type="radio" name="accent" value="#5b4fcf" aria-label="Indigo"><i style="--c:#5b4fcf"></i></label>
+          <label title="Plum"><input type="radio" name="accent" value="#8a3f8f" aria-label="Plum"><i style="--c:#8a3f8f"></i></label>
+          <label title="Rose"><input type="radio" name="accent" value="#b83a5e" aria-label="Rose"><i style="--c:#b83a5e"></i></label>
+          <label title="Amber"><input type="radio" name="accent" value="#b26b00" aria-label="Amber"><i style="--c:#b26b00"></i></label>
+          <label title="Green"><input type="radio" name="accent" value="#2e7d4f" aria-label="Green"><i style="--c:#2e7d4f"></i></label>
+          <label title="Graphite"><input type="radio" name="accent" value="#5a5a5a" aria-label="Graphite"><i style="--c:#5a5a5a"></i></label>
+        </div></div>
+      <div class="opt-row"><p id="textL">Text size</p>
+        <div class="seg" role="radiogroup" aria-labelledby="textL">
+          <label><input type="radio" name="text" value="default"><span>Default</span></label>
+          <label><input type="radio" name="text" value="large"><span>Large</span></label>
+          <label><input type="radio" name="text" value="larger"><span>Larger</span></label></div></div>
+    </div></div>
+    <div class="set"><h3>While working</h3><div>
+      <div class="opt-row"><p><label for="sHide">Hide this window</label><small>Minimise Co-opilot while it uses your mouse and keyboard.</small></p>
+        <label class="switch"><input type="checkbox" role="switch" id="sHide" name="hide"></label></div>
+      <div class="opt-row"><p><label for="sNotify">Notify when an answer is ready</label><small>A Windows notification when this window is not in front.</small></p>
+        <label class="switch"><input type="checkbox" role="switch" id="sNotify" name="notify"></label></div>
+    </div></div>
+    <div class="set"><h3>Today strip</h3><div>
+      <div class="opt-row"><p><label for="sGlance">Today strip</label><small>Next meeting, unread mail and free time.</small></p>
+        <select id="sGlance" name="glance">
+          <option value="first">Only before the first message</option>
+          <option value="collapse">Collapsed, open from the bar</option>
+          <option value="stay">Keep it on screen</option>
+          <option value="off">Don't show it</option>
+        </select></div>
+      <div class="opt-row"><p><label for="sEnd">Workday ends</label><small>Used to count free time left today.</small></p>
+        <select id="sEnd" name="workday_end"></select></div>
+      <div class="opt-row"><p><label for="sRefresh">Refresh every</label></p>
+        <select id="sRefresh" name="refresh"><option value="5">5 minutes</option><option value="15">15 minutes</option><option value="30">30 minutes</option></select></div>
+    </div></div>
+    <div class="set"><h3>Way home</h3><div>
+      <div class="opt-row"><p><label for="sHome">How you get home</label><small>Shown in the today strip from 45 minutes before the workday ends.</small></p>
+        <select id="sHome" name="home_mode"><option value="off">Don't show</option><option value="drive">Drive</option><option value="train">GO train</option></select></div>
+      <div class="opt-row" id="homeDrive" hidden><p><label for="sAddress">Home, approximately</label><small>A neighbourhood or station is enough. The time is an estimate from this network's area.</small></p>
+        <input id="sAddress" name="home_address" maxlength="80" autocomplete="street-address"></div>
+      <div class="opt-row" id="homeLine" hidden><p><label for="sLine">Line</label></p>
+        <select id="sLine" name="go_line"></select></div>
+      <div class="opt-row" id="homeStop" hidden><p><label for="sStop">Home station</label><small>The office is at Union, so this is the station the train goes to.</small></p>
+        <input id="sStop" name="go_stop" maxlength="40" placeholder="Bramalea"></div>
+    </div></div>
+    <div class="set"><h3>Start screen</h3><div>
+      <div class="opt-row"><p><label for="sSugg">Show suggested tasks</label></p>
+        <label class="switch"><input type="checkbox" role="switch" id="sSugg" name="suggestions"></label></div>
+    </div></div>
+    <div class="set"><h3>Troubleshooting</h3><div>
+      <div class="opt-row"><p>Developer log<small>Every step and error from this session.</small></p>
+        <button class="btn" type="button" id="openLog">Open <kbd>Ctrl Shift D</kbd></button></div>
+    </div></div>
+  </form>
+  <p class="saved" id="saved" role="status"></p>
+</section>
+
+<form class="composer" id="composer">
+  <label class="sr" for="input">Message Co-opilot</label>
+  <textarea id="input" rows="2" placeholder="Getting ready…" disabled></textarea>
+  <div class="crow">
+    <label class="switch"><input type="checkbox" role="switch" id="hide" checked> Hide while working</label>
+    <button class="btn primary" id="sendBtn" type="submit" disabled>Send</button>
+  </div>
+</form>
+<p class="bar" id="bar"><span><kbd>Enter</kbd>Send</span><span><kbd>Shift Enter</kbd>New line</span><span><kbd>Esc</kbd>Stop</span><span><kbd>Ctrl N</kbd>New chat</span></p>
+
+<section id="log" aria-label="Developer log">
+  <header><h1>Developer log</h1><button class="btn" type="button" id="logClose">Close</button></header>
+  <pre id="logText"></pre>
+</section>
+
+<script>
+const $ = id => document.getElementById(id);
+const input = $("input"), convo = $("convo"), main = $("main");
+const ICON = {
+  done: '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><path d="M3 8.5l3 3 7-7"/></svg>',
+  now: '<svg class="spin" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><path d="M8 2a6 6 0 1 1-6 6"/></svg>'
+};
+let ready = false, busy = false, turn = null, steps = null;
+
+const api = (name, ...args) => window.pywebview && window.pywebview.api[name](...args);
+const el = (tag, cls, text) => { const n = document.createElement(tag); if (cls) n.className = cls; if (text != null) n.textContent = text; return n; };
+const scroll = () => requestAnimationFrame(() => main.scrollTop = main.scrollHeight);
+
+function row(who, content) {
+  const r = el("div", "row turn"); r.append(el("span", "who", who), content); convo.append(r); scroll(); return content;
+}
+function copyText(text, btn) {
+  const area = document.createElement("textarea");
+  area.value = text; area.style.position = "fixed"; area.style.left = "-9999px";
+  document.body.append(area); area.select();
+  try { document.execCommand("copy"); btn.textContent = "Copied"; setTimeout(() => btn.textContent = "Copy", 1200); }
+  catch (e) { btn.textContent = "Copy failed"; }
+  area.remove();
+}
+function body(html, cls) {
+  const b = el("div", "body" + (cls ? " " + cls : ""));
+  const msg = el("div", "msg"); msg.innerHTML = html;
+  const c = el("button", "copy", "Copy"); c.type = "button"; c.title = "Copy this message";
+  c.addEventListener("click", () => copyText(msg.innerText.trim(), c));
+  b.append(msg, c);
+  return b;
+}
+
+function setComposer() {
+  const can = ready && !busy;
+  input.disabled = !can;
+  input.placeholder = busy ? "Co-opilot is working. Press Esc to stop." : ready ? "Ask, or tell me what to do on this PC" : "Getting ready…";
+  $("sendBtn").disabled = !can || !input.value.trim();
+  $("newBtn").disabled = !can;
+  $("stopBtn").hidden = !busy; $("newBtn").hidden = busy;
+  document.querySelectorAll(".task,.cell").forEach(b => b.disabled = !can);
+}
+
+function send(text) {
+  text = (text || "").trim();
+  if (!text || !ready || busy) return;
+  if (!$("settings").hidden) showSettings(false);
+  busy = true; input.value = ""; fit(); setComposer();
+  $("start").hidden = true;
+  chatted = true; layoutGlance();
+  const you = el("div"); you.append(body("", "you")); you.firstChild.textContent = text;
+  row("You", you);
+  turn = el("div"); steps = el("ul", "steps"); turn.append(steps);
+  row("Co-opilot", turn);
+  step("Working on it");
+  api("send", text);
+}
+
+function step(label) {
+  if (!steps) return;
+  const last = steps.lastElementChild;
+  if (last && last.dataset.label === label) return;
+  if (last && last.dataset.label === "Working on it") last.remove();
+  else if (last) { last.classList.remove("now"); last.querySelector("i").innerHTML = ICON.done; last.querySelector("i").setAttribute("aria-label", "done"); }
+  const li = el("li", "step now"); li.dataset.label = label;
+  const i = el("i"); i.innerHTML = ICON.now; li.append(i, el("span", null, label));
+  steps.append(li); scroll();
+}
+function settle() {
+  if (!steps) return;
+  const last = steps.lastElementChild;
+  if (last && last.dataset.label === "Working on it" && steps.children.length === 1) last.remove();
+  else if (last) { last.classList.remove("now"); last.querySelector("i").innerHTML = ICON.done; }
+}
+function reply(html, cls) { settle(); (turn || row("Co-opilot", el("div"))).append(body(html, cls)); scroll(); }
+
+function fit() { input.style.height = "auto"; input.style.height = Math.min(input.scrollHeight, 160) + "px"; }
+
+const STATE = s => /^error/i.test(s) ? "error" : /^(ready|done|stopped)/i.test(s) ? "ready" : "working";
+
+window.ui = {
+  status(text) {
+    $("stateText").textContent = $("state").title = text.replace(/^Step \d+: /, "");
+    $("state").dataset.s = busy && STATE(text) === "ready" ? "working" : STATE(text);
+    if (/^Sign in/i.test(text)) reply("<p>Sign in to your work account in the browser window that opened. I'll carry on after that.</p>", "note");
+  },
+  step,
+  say(html) { settle(); turn && turn.append(body(html)); step("Working on it"); },
+  answer(html) { reply(html); },
+  note(html) { reply(html, "note"); },
+  error(html) { reply(html, "err"); },
+  end() { settle(); },
+  ask(id, p) { settle(); askCard(id, p); },
+  idle() {
+    settle();
+    ready = true; busy = false; turn = steps = null;
+    const s = STATE($("stateText").textContent);
+    $("state").dataset.s = s;
+    if (s === "ready") $("stateText").textContent = "Ready";
+    setComposer(); if (!$("log").classList.contains("open")) input.focus();
+  },
+  files(list) {
+    settle();
+    const box = el("ul", "files"); box.setAttribute("aria-label", list.length === 1 ? "File created" : list.length + " files created");
+    for (const f of list) {
+      const li = el("li", "file");
+      const ext = (f.name.split(".").pop() || "").slice(0, 4).toUpperCase();
+      const open = el("button", "fname"); open.type = "button"; open.title = "Open " + f.path;
+      open.append(el("b", "ext", ext), el("span", null, f.name));
+      open.addEventListener("click", () => api("file_op", "open", f.path));
+      const meta = el("small", "fmeta", f.size + " · " + f.folder); meta.title = f.folder;
+      const acts = el("div", "facts");
+      const act = (label, fn) => { const b = el("button", "btn", label); b.type = "button"; b.addEventListener("click", () => fn(b)); acts.append(b); };
+      act("Open", () => api("file_op", "open", f.path));
+      act("Show in folder", () => api("file_op", "reveal", f.path));
+      act("Open with…", () => api("file_op", "open_with", f.path));
+      act("Copy path", b => { copyText(f.path, b); setTimeout(() => b.textContent = "Copy path", 1200); });
+      act("Copy file", b => { api("file_op", "copy_file", f.path); b.textContent = "Copied, paste anywhere"; setTimeout(() => b.textContent = "Copy file", 1600); });
+      li.append(open, meta, acts); box.append(li);
+    }
+    (turn || row("Co-opilot", el("div"))).append(box); scroll();
+  },
+  took(seconds) { turn && turn.append(el("p", "took", seconds + " s")); },
+  closed() { ready = false; busy = false; setComposer(); input.placeholder = "Co-opilot has stopped. Close and reopen it."; },
+  log(line, isError) {
+    const pre = $("logText"), s = el("span", isError ? "e" : null, line + "\n");
+    pre.append(s); if (pre.childNodes.length > 2000) pre.firstChild.remove();
+    pre.scrollTop = pre.scrollHeight;
+  },
+  glance(g) {
+    const set = (id, v, s, cls) => { const c = $(id); c.querySelector(".v").textContent = v; c.querySelector(".v").className = "v" + (cls ? " " + cls : ""); c.querySelector(".s").textContent = s; };
+    if (!g.outlook) {
+      set("gNext", "–", "Open Outlook to see your day", "dim"); set("gMail", "–", "Outlook isn't open", "dim"); set("gFree", "–", "Outlook isn't open", "dim");
+    } else {
+      const n = g.next;
+      n ? set("gNext", n.time, `${n.subject} · ${n.when}`, n.soon ? "soon" : "") : set("gNext", "None", "Nothing in the next 14 days", "dim");
+      g.mail ? set("gMail", String(g.mail.unread), g.mail.unread ? `Latest from ${g.mail.from}` : "Inbox is clear") : set("gMail", "–", "Couldn't read mail", "dim");
+      const f = g.free || { minutes: 0 }, m = f.minutes;
+      set("gFree", m >= 60 ? `${Math.floor(m / 60)}h ${String(m % 60).padStart(2, "0")}m` : `${m}m`,
+          f.gap ? (f.now ? `Free now until ${f.gap.split(" to ")[1]}` : `Next gap ${f.gap}`) : m ? "No 30-minute gaps left" : "Workday is over", m ? "" : "dim");
+    }
+    const home = $("gHome");
+    if (g.home) {
+      home.hidden = false; home.dataset.ask = g.home.ask || "";
+      home.querySelector(".k").textContent = g.home.k;
+      home.querySelector(".v").textContent = g.home.value;
+      home.querySelector(".v").className = "v" + (g.home.value === "–" || g.home.value === "None" ? " dim" : "");
+      home.querySelector(".s").textContent = g.home.detail;
+    } else home.hidden = true;
+    const bits = [$("gNext").querySelector(".v").textContent, $("gMail").querySelector(".v").textContent + " unread", $("gFree").querySelector(".v").textContent + " free"];
+    if (g.home) bits.push(g.home.k + " " + g.home.value);
+    $("glanceSum").textContent = bits.join("  ·  ");
+  }
+};
+
+function askCard(id, p) {
+  const box = el("fieldset", "ask"); const name = "q" + id;
+  box.append(el("legend", null, p.question));
+  const opts = p.options.map(o => {
+    const l = el("label", "opt"), i = el("input"); i.type = p.multi ? "checkbox" : "radio"; i.name = name; i.value = o;
+    l.append(i, el("span", null, o)); box.append(l); return i;
+  });
+  let txt = null;
+  if (p.allow_text) {
+    const lid = name + "t"; const lab = el("label", "lbl", p.options.length ? "Anything else (optional)" : "Your answer"); lab.htmlFor = lid;
+    txt = el("textarea"); txt.id = lid; box.append(lab, txt);
+  }
+  const msg = el("p", "msg"); msg.setAttribute("role", "alert");
+  const acts = el("div", "acts"), skip = el("button", "btn", "Skip"), ok = el("button", "btn primary", "Submit");
+  skip.type = ok.type = "button"; acts.append(skip, ok); box.append(acts, msg);
+  const close = answer => {
+    box.classList.add("closed"); box.disabled = true;
+    const picked = opts.filter(i => i.checked).map(i => i.value), t = txt ? txt.value.trim() : "";
+    box.append(el("p", "result", answer ? "You answered: " + picked.concat(t ? [t] : []).join("; ") : "Skipped"));
+    api("reply", id, answer ? { choices: picked, text: t } : null);
+    step("Working on it");
+  };
+  skip.onclick = () => close(false);
+  ok.onclick = () => {
+    if (p.options.length && !opts.some(i => i.checked) && !(txt && txt.value.trim())) { msg.textContent = "Pick an option or describe what you want."; return; }
+    close(true);
+  };
+  (turn || row("Co-opilot", el("div"))).append(box); scroll();
+  (opts[0] || txt || ok).focus();
+}
+
+$("composer").addEventListener("submit", e => { e.preventDefault(); send(input.value); });
+input.addEventListener("input", () => { fit(); setComposer(); });
+input.addEventListener("keydown", e => { if (e.key === "Enter" && !e.shiftKey && !e.isComposing) { e.preventDefault(); send(input.value); } });
+document.querySelectorAll("#start .task").forEach(b => b.addEventListener("click", () => send(b.querySelector("span").textContent)));
+document.querySelectorAll(".cell").forEach(b => b.addEventListener("click", () => b.dataset.ask === "settings" ? showSettings(true) : send(b.dataset.ask)));
+let settings = null, chatted = false, expanded = true;
+for (let h = 14; h < 22; h++) $("sEnd").append(new Option(`${h}:00`, h));
+["Lakeshore West","Lakeshore East","Kitchener","Milton","Barrie","Richmond Hill","Stouffville"].forEach(n => $("sLine").append(new Option(n, n)));
+function layoutGlance() {
+  const mode = settings ? settings.glance : "first";
+  const gone = mode === "off" || (mode === "first" && chatted);
+  $("glance").hidden = gone;
+  $("glance").classList.toggle("collapsed", mode === "collapse" && !expanded);
+  $("glanceBar").hidden = mode !== "collapse";
+  $("glanceBar").setAttribute("aria-expanded", String(!(mode === "collapse" && !expanded)));
+  api("set_glance_live", !gone && !(mode === "collapse" && !expanded));
+}
+function homeFields() {
+  const mode = $("sHome").value;
+  $("homeDrive").hidden = mode !== "drive";
+  $("homeLine").hidden = $("homeStop").hidden = mode !== "train";
+}
+function applySettings(s) {
+  settings = s;
+  const root = document.documentElement;
+  s.theme === "system" ? delete root.dataset.theme : root.dataset.theme = s.theme;
+  root.dataset.text = s.text;
+  root.style.setProperty("--accent", s.accent);
+  $("hide").checked = $("sHide").checked = s.hide;
+  $("sNotify").checked = s.notify;
+  $("sGlance").value = s.glance; $("sSugg").checked = s.suggestions;
+  $("start").classList.toggle("off", !s.suggestions);
+  $("sEnd").value = s.workday_end; $("sRefresh").value = s.refresh;
+  $("sHome").value = s.home_mode; $("sAddress").value = s.home_address; $("sLine").value = s.go_line; $("sStop").value = s.go_stop;
+  homeFields(); layoutGlance();
+  document.querySelectorAll("#setForm input[type=radio]").forEach(r => r.checked = s[r.name] === r.value);
+}
+function saveSettings(patch) {
+  if (!settings) return;
+  const f = $("setForm");
+  const next = Object.assign({}, settings, {
+    theme: f.theme.value, text: f.text.value, hide: $("sHide").checked, notify: $("sNotify").checked, glance: $("sGlance").value,
+    accent: f.accent.value || settings.accent, suggestions: $("sSugg").checked, workday_end: +$("sEnd").value, refresh: +$("sRefresh").value,
+    home_mode: $("sHome").value, home_address: $("sAddress").value, go_line: $("sLine").value, go_stop: $("sStop").value
+  }, patch);
+  applySettings(next);
+  api("save_settings", next).then(s => { applySettings(s); $("saved").textContent = "Saved"; setTimeout(() => $("saved").textContent = "", 1500); });
+}
+function showSettings(open) {
+  open = open ?? $("settings").hidden;
+  $("settings").hidden = !open; main.hidden = $("composer").hidden = open;
+  $("setBtn").setAttribute("aria-expanded", open);
+  open ? $("setTitle").focus() : input.focus();
+}
+$("setForm").addEventListener("change", () => { homeFields(); saveSettings(); });
+$("glanceBar").addEventListener("click", () => { expanded = !expanded; layoutGlance(); });
+$("hide").addEventListener("change", e => saveSettings({ hide: e.target.checked }));
+$("setBtn").addEventListener("click", () => showSettings());
+$("setDone").addEventListener("click", () => showSettings(false));
+$("openLog").addEventListener("click", () => toggleLog(true));
+window.addEventListener("pywebviewready", () => api("get_settings").then(applySettings));
+$("stopBtn").addEventListener("click", () => api("stop"));
+$("newBtn").addEventListener("click", newChat);
+$("logClose").addEventListener("click", () => toggleLog(false));
+
+function newChat() {
+  if (busy || !ready) return;
+  convo.replaceChildren(); $("start").hidden = false; chatted = false; layoutGlance(); api("new_chat"); input.focus();
+}
+function toggleLog(open) {
+  const log = $("log"); open = open ?? !log.classList.contains("open");
+  log.classList.toggle("open", open); (open ? $("logClose") : input).focus();
+}
+document.addEventListener("click", e => {
+  const a = e.target.closest("a");
+  if (!a || !a.href) return;
+  e.preventDefault();
+  api("open_link", a.href);
+});
+document.addEventListener("keydown", e => {
+  const k = e.key.toLowerCase();
+  if (e.key === "Escape") {
+    if ($("log").classList.contains("open")) toggleLog(false);
+    else if (busy) api("stop");
+    else if (!$("settings").hidden) showSettings(false);
+    return;
+  }
+  if (e.ctrlKey && e.key === ",") { e.preventDefault(); showSettings(); return; }
+  if (e.ctrlKey && e.shiftKey && k === "d") { e.preventDefault(); toggleLog(); return; }
+  if (e.ctrlKey && !e.shiftKey && k === "n") { e.preventDefault(); newChat(); return; }
+  if (e.ctrlKey && /^[1-6]$/.test(e.key) && !$("start").hidden && settings && settings.suggestions) {
+    e.preventDefault(); const b = document.querySelectorAll("#start .task")[+e.key - 1]; b && !b.disabled && b.click();
+  }
+});
+setComposer();
+</script>
+</body>
+</html>

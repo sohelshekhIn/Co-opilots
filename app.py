@@ -1,25 +1,104 @@
 """Co-opilot: computer use through work Copilot. Run: python app.py  (Ctrl+Shift+D opens the developer log)"""
 
 import ctypes
+import ctypes.wintypes
+import html
+import itertools
+import json
+import os
 import queue
 import re
+import subprocess
 import threading
+import webbrowser
 import time
 import tkinter as tk
 import winreg
-from tkinter import ttk
+from pathlib import Path
 
-import sv_ttk
+import webview
+
+import account
+import commute
 import desktop
+import files
 import loop
 
 APP_NAME = "Co-opilot"
 SIDE_W = 520
-HINT = "Ask or describe a task, e.g. open Notepad and type hello, or why is my PC slow?"
-WELCOME = ("Hi! I can use this PC for you or check what's going on with it.\n"
-           "- **Do things:** open apps, click, type\n"
-           "- **Diagnose:** slow PC, disk space, network, failing services, recent errors\n"
-           "Press **Enter** to send, **Shift+Enter** for a new line. Move the mouse to a screen corner to stop.")
+UI = Path(__file__).with_name("ui.html")
+SETTINGS_FILE = Path(os.environ.get("APPDATA") or Path.home()) / APP_NAME / "settings.json"
+_HEX = re.compile(r"^#[0-9a-fA-F]{6}$")
+CHOICES = {
+    "theme": ("system", "light", "dark"),
+    "text": ("default", "large", "larger"),
+    "hide": (True, False),
+    "glance": ("first", "collapse", "stay", "off"),
+    "suggestions": (True, False),
+    "notify": (True, False),
+    "workday_end": tuple(range(14, 22)),
+    "refresh": (5, 15, 30),
+    "home_mode": ("off", "drive", "train"),
+    "go_line": commute.LINES,
+}
+DEFAULTS = {"theme": "system", "text": "default", "hide": True, "glance": "first", "suggestions": True,
+            "notify": False, "workday_end": 17, "refresh": 5, "accent": "#3c6e71",
+            "home_mode": "off", "home_address": "", "go_line": "Kitchener", "go_stop": ""}
+
+
+def clean_settings(raw):
+    """Known keys with allowed values only; anything else falls back to the default."""
+    raw = dict(raw) if isinstance(raw, dict) else {}
+    if raw.get("glance") is True:
+        raw["glance"] = "first"
+    elif raw.get("glance") is False:
+        raw["glance"] = "off"
+    out = {}
+    for key, value in DEFAULTS.items():
+        got = raw.get(key, value)
+        if key == "accent":
+            out[key] = got if isinstance(got, str) and _HEX.match(got) else value
+        elif key in ("home_address", "go_stop"):
+            out[key] = " ".join(got.split())[:80] if isinstance(got, str) else ""
+        elif got in CHOICES.get(key, ()) and type(got) is type(value):
+            out[key] = got
+        else:
+            out[key] = value
+    return out
+
+
+def load_settings():
+    try:
+        return clean_settings(json.loads(SETTINGS_FILE.read_text(encoding="utf-8")))
+    except (OSError, ValueError):
+        return dict(DEFAULTS)
+
+
+def save_settings(settings):
+    SETTINGS_FILE.parent.mkdir(parents=True, exist_ok=True)
+    SETTINGS_FILE.write_text(json.dumps(settings, indent=1), encoding="utf-8")
+
+
+def _reduce_motion():
+    enabled = ctypes.c_int(1)
+    ok = ctypes.windll.user32.SystemParametersInfoW(0x1042, 0, ctypes.byref(enabled), 0)
+    return bool(ok) and not enabled.value
+
+
+def _toast(text):
+    """One Windows notification. Shows under PowerShell because this app is not an installed package."""
+    body = html.escape(_plain(text)[:160] or "Your answer is ready.").replace("'", "&apos;")
+    script = (
+        "$xml = '<toast><visual><binding template=\"ToastGeneric\"><text>Co-opilot</text><text>"
+        + body + "</text></binding></visual></toast>';"
+        "$doc = [Windows.Data.Xml.Dom.XmlDocument, Windows.Data.Xml.Dom.XmlDocument, ContentType = WindowsRuntime]::New();"
+        "$doc.LoadXml($xml);"
+        "[Windows.UI.Notifications.ToastNotificationManager, Windows.UI.Notifications, ContentType = WindowsRuntime] | Out-Null;"
+        "$id = '{1AC14E77-02E7-4E5D-B744-2EB1AE5198B7}\\WindowsPowerShell\\v1.0\\powershell.exe';"
+        "[Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier($id).Show("
+        "[Windows.UI.Notifications.ToastNotification]::New($doc))"
+    )
+    subprocess.run(["powershell", "-NoProfile", "-Command", script], capture_output=True, timeout=20)
 
 
 def _dark_mode():
@@ -28,17 +107,6 @@ def _dark_mode():
             return winreg.QueryValueEx(key, "AppsUseLightTheme")[0] == 0
     except OSError:
         return False
-
-
-def _dot_colour(status):
-    s = status.lower()
-    if s.startswith(("error", "stopped")):
-        return "#d13438"
-    if s.startswith("step") or s == "stopping":
-        return "#0078d4"
-    if s.startswith(("ready", "done", "chat ready")):
-        return "#107c10"
-    return "#ca5010"
 
 
 _INLINE = re.compile(r"(\*\*[^*]+\*\*|`[^`]+`)")
@@ -74,13 +142,72 @@ def markdown_runs(text):
     return runs
 
 
+def _linkify(safe):
+    """Turn [label](https://...) and bare http(s) addresses into links. `safe` is already escaped."""
+    def linked(label, url):
+        return f'<a href="{html.escape(url, quote=True)}">{label}</a>'
+
+    safe = re.sub(r"\[([^\]]+)\]\((https?://[^\s)]+)\)", lambda m: linked(m.group(1), m.group(2)), safe)
+    parts = re.split(r"(<a href=.*?</a>)", safe)
+    for i, part in enumerate(parts):
+        if i % 2:
+            continue
+        def bare(match):
+            url = match.group(0).rstrip(".,)")
+            return linked(url, url)
+
+        parts[i] = re.sub(r"https?://[^\s<]+", bare, part)
+    return "".join(parts)
+
+
+def _plain(text):
+    text = re.sub(r"\[([^\]]+)\]\([^)]*\)", r"\1", text or "")
+    return " ".join(re.sub(r"[*`#]", "", text).split())
+
+
+def markdown_html(text):
+    """Escaped HTML paragraphs for the transcript, built from markdown_runs."""
+    out, line = [], []
+    for part, tags in markdown_runs((text or "").strip()):
+        if part != "\n":
+            if "dot" not in tags:
+                safe = _linkify(html.escape(part))
+                line.append(f"<strong>{safe}</strong>" if "b" in tags else f"<code>{safe}</code>" if "code" in tags else safe)
+            continue
+        body = "".join(line).strip()
+        line = []
+        if body:
+            cls = "h" if "h" in tags else ("ol" if re.match(r"\d+[.)]\s", body) else "li") if "bullet" in tags else ""
+            out.append(f'<p class="{cls}">{body}</p>' if cls else f"<p>{body}</p>")
+    return "".join(out)
+
+
+def describe(action):
+    """Plain step label for the transcript, or None for actions that aren't worth a row."""
+    kind = action.get("action")
+    labels = {
+        "open_app": f"Opening {action.get('name', 'an app')}",
+        "focus": f"Switching to {action.get('title', 'a window')}",
+        "window": f"Arranging {action.get('title', 'a window')}",
+        "type": "Typing", "key": f"Pressing {action.get('key', 'a key')}", "scroll": "Scrolling",
+        "click": "Clicking", "double_click": "Clicking", "right_click": "Clicking", "drag": "Dragging",
+        "open_url": "Opening a web page", "open_path": "Opening a folder", "look": "Checking the screen",
+        "inspect": f"Checking {action.get('topic', 'this PC')}", "account": "Reading your work account",
+        "ado": "Working in Azure DevOps", "list_dir": "Looking through files", "read_file": "Reading a file",
+        "write_file": "Saving a file", "read_clipboard": "Reading the clipboard",
+    }
+    if kind == "account" and action.get("op") == "recordings":
+        return "Finding the meeting chat and transcript"
+    return labels.get(kind)
+
+
 class Overlay:
     """Click-through 'hands off' layer shown while Co-opilot drives the PC, with a clickable Stop
     button per monitor. All of it is hidden from screenshots."""
 
     KEY = "#010203"
-    ACCENT = "#3b8eea"
-    TINT = 0.05
+    ACCENT = "#ff453a"
+    TINT = 0.10
 
     def __init__(self, root, on_stop):
         self.root = root
@@ -91,40 +218,39 @@ class Overlay:
         width, height = max(m[2] for m in screens) - vx, max(m[3] for m in screens) - vy
         # Tk reads "-1920" as "from the right edge"; "+-1920" is a negative position.
         geometry = f"{width}x{height}+{vx}+{vy}"
-        self.tint = self._layer(geometry, alpha=self.TINT, bg="#0a2a5e")
-        self.chrome = self._layer(geometry, alpha=0.95, bg=self.KEY)
+        self.tint = self._layer(geometry, alpha=self.TINT, bg="#000000")
+        self.chrome = self._layer(geometry, alpha=0.96, bg=self.KEY)
         self.chrome.attributes("-transparentcolor", self.KEY)
         canvas = tk.Canvas(self.chrome, bg=self.KEY, highlightthickness=0)
         canvas.pack(fill="both", expand=True)
         for l, t, r, b, _primary in screens:
             l, t, r, b = l - vx, t - vy, r - vx, b - vy
-            for inset, line, colour in ((2, 6, "#1f5fa8"), (5, 3, self.ACCENT), (7, 1, "#9cc7ff")):
-                canvas.create_rectangle(l + inset, t + inset, r - inset, b - inset, outline=colour, width=line)
-            pill_w, pill_h, top = 600, 64, t + 28
+            canvas.create_rectangle(l + 2, t + 2, r - 2, b - 2, outline=self.ACCENT, width=3)
+            pill_w, pill_h, top = 560, 60, t + 28
             left = l + (r - l - pill_w) // 2
-            self._pill(canvas, left, top, left + pill_w, top + pill_h, "#1b1d22")
-            canvas.create_oval(left + 22, top + 26, left + 34, top + 38, fill=self.ACCENT, outline="")
-            canvas.create_text(left + 48, top + 22, anchor="w", fill="#ffffff",
-                               text=f"{APP_NAME} is using your computer", font=("Segoe UI Semibold", 13))
-            canvas.create_text(left + 48, top + 44, anchor="w", fill="#a9b4c2",
-                               text="Please don't touch the mouse or keyboard · press Stop to take over",
+            canvas.create_rectangle(left, top, left + pill_w, top + pill_h, fill="#111111", outline="#2b2b2b")
+            canvas.create_rectangle(left + 20, top + 26, left + 27, top + 33, fill=self.ACCENT, outline="")
+            canvas.create_text(left + 42, top + 20, anchor="w", fill="#ececec",
+                               text=f"{APP_NAME} is using your computer", font=("Segoe UI Semibold", 12))
+            canvas.create_text(left + 42, top + 41, anchor="w", fill="#a0a0a0",
+                               text="Hands off the mouse and keyboard, or press Stop to take over",
                                font=("Segoe UI", 9))
             # Separate small window: the overlay itself must stay click-through.
-            stop = tk.Toplevel(root, bg="#c42b1c")
+            stop = tk.Toplevel(root, bg=self.ACCENT)
             stop.withdraw()
             stop.overrideredirect(True)
             stop.attributes("-topmost", True)
-            stop.geometry(f"96x36+{left + pill_w - 116 + vx}+{top + 14 + vy}")
-            label = tk.Label(stop, text="■  Stop", bg="#c42b1c", fg="#ffffff", activebackground="#a4262c",
-                             font=("Segoe UI Semibold", 11), cursor="hand2")
+            stop.geometry(f"88x34+{left + pill_w - 104 + vx}+{top + 13 + vy}")
+            label = tk.Label(stop, text="■  Stop", bg=self.ACCENT, fg="#160303", activebackground="#e0352b",
+                             font=("Segoe UI Semibold", 10), cursor="hand2")
             label.pack(fill="both", expand=True)
             for widget in (stop, label):
                 widget.bind("<Button-1>", lambda _e: self._stop_clicked())
-            label.bind("<Enter>", lambda _e, w=label: w.configure(bg="#a4262c"))
-            label.bind("<Leave>", lambda _e, w=label: w.configure(bg="#c42b1c"))
+            label.bind("<Enter>", lambda _e, w=label: w.configure(bg="#e0352b"))
+            label.bind("<Leave>", lambda _e, w=label: w.configure(bg=self.ACCENT))
             self.stops.append((stop, label))
         self._shown = False
-        self._phase = 0
+        self._fade = 1.0
 
     def _layer(self, geometry, alpha, bg):
         layer = tk.Toplevel(self.root, bg=bg)
@@ -133,13 +259,6 @@ class Overlay:
         layer.geometry(geometry)
         layer.attributes("-topmost", True, "-alpha", alpha)
         return layer
-
-    @staticmethod
-    def _pill(canvas, x1, y1, x2, y2, colour):
-        radius = (y2 - y1) // 2
-        canvas.create_oval(x1, y1, x1 + 2 * radius, y2, fill=colour, outline="")
-        canvas.create_oval(x2 - 2 * radius, y1, x2, y2, fill=colour, outline="")
-        canvas.create_rectangle(x1 + radius, y1, x2 - radius, y2, fill=colour, outline="")
 
     @staticmethod
     def _seal(layer, click_through=True):
@@ -174,6 +293,8 @@ class Overlay:
             stop.update_idletasks()
             self._seal(stop, click_through=False)
             stop.lift()
+        self._fade = 1.0 if _reduce_motion() else 0.0
+        self.tint.attributes("-alpha", self.TINT if self._fade else 0.04)
         self._pulse()
 
     def hide(self):
@@ -186,156 +307,173 @@ class Overlay:
     def _pulse(self):
         if not self._shown:
             return
-        self._phase = (self._phase + 1) % 80
-        wave = abs(40 - self._phase) / 40
-        self.tint.attributes("-alpha", self.TINT * (0.6 + 0.8 * wave))
+        if self._fade < 1:
+            self._fade = min(1.0, self._fade + 0.125)
+            eased = 1 - (1 - self._fade) ** 3
+            self.tint.attributes("-alpha", 0.04 + (self.TINT - 0.04) * eased)
+        else:
+            self.tint.attributes("-alpha", self.TINT)
         self.tint.attributes("-topmost", True)
         self.chrome.attributes("-topmost", True)
         for stop, _label in self.stops:
             stop.attributes("-topmost", True)
             stop.lift()
-        self.root.after(50, self._pulse)
+        self.root.after(50 if self._fade < 1 else 400, self._pulse)
+
+
+class OverlayThread:
+    """Runs the tk overlay on its own thread; the webview owns the main thread."""
+
+    def __init__(self, on_stop):
+        self.commands = queue.Queue()
+        threading.Thread(target=self._run, args=(on_stop,), daemon=True).start()
+
+    def _run(self, on_stop):
+        root = tk.Tk()
+        root.withdraw()
+        overlay = Overlay(root, on_stop)
+
+        def poll():
+            try:
+                while True:
+                    command = self.commands.get_nowait()
+                    if command is None:
+                        root.destroy()
+                        return
+                    getattr(overlay, command)()
+            except queue.Empty:
+                pass
+            root.after(50, poll)
+
+        poll()
+        root.mainloop()
+
+    def show(self):
+        self.commands.put("show")
+
+    def hide(self):
+        self.commands.put("hide")
+
+    def close(self):
+        self.commands.put(None)
+
+
+class Api:
+    """What the page may call. Only these methods are exposed to JavaScript."""
+
+    def __init__(self, app):
+        self._app = app
+
+    def send(self, text):
+        return self._app.start(str(text))
+
+    def stop(self):
+        self._app.on_stop()
+
+    def new_chat(self):
+        if not self._app.busy:
+            self._app.tasks.put(loop.RESET)
+
+    def reply(self, card_id, answer):
+        self._app.reply(card_id, answer)
+
+    def get_settings(self):
+        return self._app.settings
+
+    def save_settings(self, raw):
+        return self._app.apply_settings(raw)
+
+    def refresh_glance(self):
+        self._app.glance_now.set()
+
+    def set_glance_live(self, live):
+        self._app.set_glance_live(live)
+
+    def file_op(self, op, path):
+        """Only files this app wrote in this session; the page can't point these at anything else."""
+        path = str(path)
+        if path not in self._app._made or not Path(path).exists():
+            return "That file is no longer there."
+        if op == "open":
+            os.startfile(path)
+        elif op == "open_with":
+            subprocess.Popen(["rundll32.exe", "shell32.dll,OpenAs_RunDLL", path])
+        elif op == "reveal":
+            subprocess.Popen(f'explorer.exe /select,"{path}"')
+        elif op == "copy_file":
+            subprocess.run(["powershell", "-NoProfile", "-Command", "Set-Clipboard -LiteralPath $args[0]", path],
+                           creationflags=subprocess.CREATE_NO_WINDOW, timeout=15)
+        return ""
+
+    def open_link(self, url):
+        url = str(url)
+        if url.startswith(("https://", "http://")):
+            webbrowser.open(url)
 
 
 class App:
     def __init__(self):
-        self.root = tk.Tk()
-        self.root.title(APP_NAME)
-        self.root.geometry(f"{SIDE_W}x760")
-        self.root.minsize(400, 520)
-        self.dark = _dark_mode()
-        sv_ttk.set_theme("dark" if self.dark else "light")
         self.messages = queue.Queue()
         self.tasks = queue.Queue()
         self.stop = threading.Event()
-        self._busy = False
+        self.replies = {}
+        self._ids = itertools.count(1)
+        self.busy = False
+        self.settings = load_settings()
+        self.glance_now = threading.Event()
+        self._glance_live = True
+        self._glance_force = False
         self._hands_on = False
+        self._parked = False
         self._answered = False
+        self._made = set()
         self._last_error = ""
+        self._last_answer = ""
+        self._status = ""
         self._started_at = 0.0
-        bg = self._bg()
-        self.text_bg, self.text_fg = bg, ("#f3f3f3" if self.dark else "#1b1b1b")
-        card = "#333842" if self.dark else "#ffffff"
-        reply_bg = "#262a30" if self.dark else "#eef1f5"
-        self.muted = "#9a9a9a" if self.dark else "#6b6b6b"
-        bubble = "#0f6cbd"
-        code_bg = "#363b44" if self.dark else "#dfe4ea"
-        accent = "#4ca3ff" if self.dark else "#0063b1"
-        self.card, self.accent = card, accent
-        self._open_card = None
+        self._loaded = False
+        self.overlay = OverlayThread(self.on_stop)
+        self.window = webview.create_window(
+            APP_NAME, UI.as_uri(), js_api=Api(self), width=SIDE_W, height=820, min_size=(420, 560),
+            background_color="#0e0e0e" if self._dark() else "#f3f3f1")
+        self.window.events.loaded += self._on_loaded
+        self.window.events.closing += self._on_close
 
-        side = ttk.Frame(self.root, padding=(16, 14, 16, 12), width=SIDE_W)
-        side.pack(side="left", fill="both", expand=True)
+    def run(self):
+        webview.start()
 
-        header = ttk.Frame(side)
-        header.pack(fill="x")
-        self.dot = tk.Canvas(header, width=12, height=12, highlightthickness=0, bg=bg)
-        self.dot.pack(side="left", padx=(0, 8))
-        self.dot_id = self.dot.create_oval(2, 2, 11, 11, fill=_dot_colour("starting"), outline="")
-        self.status = tk.StringVar(value="Starting")
-        ttk.Label(header, textvariable=self.status, font=("Segoe UI Semibold", 11)).pack(side="left")
-        ttk.Button(header, text="New chat", command=self._new_conversation).pack(side="right")
+    @property
+    def hide(self):
+        return self.settings["hide"]
 
-        # Composer at the bottom, transcript fills the rest.
-        bottom = self.bottom = ttk.Frame(side)
-        bottom.pack(side="bottom", fill="x", pady=(10, 0))
-        self.task = tk.Text(bottom, height=3, wrap="word", font=("Segoe UI", 11), relief="flat", padx=14, pady=10,
-                            highlightthickness=2)
-        self.task.pack(fill="x")
-        # sv_ttk's tk_setPalette repaints classic widgets after the theme loads, so colour it afterwards too.
-        composer = dict(bg=card, fg=self.text_fg, insertbackground=self.text_fg,
-                        highlightbackground="#4a6a8f" if self.dark else "#9cbbe0",
-                        highlightcolor="#4ca3ff" if self.dark else "#0078d4")
-        self.task.configure(**composer)
-        self.task.bind("<<ThemeChanged>>", lambda _e: self.task.configure(**composer))
-        self.root.after(300, lambda: self.task.configure(**composer))
-        self.task.tag_configure("hint", foreground=self.muted)
-        self._show_hint()
-        self.task.bind("<FocusIn>", lambda _e: self._clear_hint())
-        self.task.bind("<FocusOut>", lambda _e: self._show_hint())
-        self.task.bind("<Return>", lambda _e: (self._start(), "break")[1])
-        self.task.bind("<Shift-Return>", lambda _e: None)
+    def _dark(self):
+        theme = self.settings["theme"]
+        return _dark_mode() if theme == "system" else theme == "dark"
 
-        actions = ttk.Frame(bottom)
-        actions.pack(fill="x", pady=(8, 0))
-        self.start_btn = ttk.Button(actions, text="Send", style="Accent.TButton", command=self._start, state="disabled")
-        self.start_btn.pack(side="right")
-        self.stop_btn = ttk.Button(actions, text="Stop", command=self._on_stop, state="disabled")
-        self.stop_btn.pack(side="right", padx=(0, 8))
-        self.minimize = tk.BooleanVar(value=True)
-        ttk.Checkbutton(actions, text="Hide while working", variable=self.minimize).pack(side="left")
-        ttk.Label(actions, text="Enter to send · Shift+Enter for a new line", foreground=self.muted,
-                  font=("Segoe UI", 9)).pack(side="right", padx=(0, 14))
+    def apply_settings(self, raw):
+        old = self.settings
+        self.settings = clean_settings(raw)
+        try:
+            save_settings(self.settings)
+        except OSError as exc:
+            self._dev_log(f"Error: settings not saved: {exc}")
+        watched = ("workday_end", "glance", "refresh", "home_mode", "home_address", "go_line", "go_stop")
+        if tuple(old[k] for k in watched) != tuple(self.settings[k] for k in watched):
+            self._glance_force = True
+            self.glance_now.set()
+        return self.settings
 
-        body = ttk.Frame(side)
-        body.pack(fill="both", expand=True, pady=(12, 0))
-        self.chat = tk.Text(body, wrap="word", font=("Segoe UI", 11), relief="flat", insertwidth=0,
-                            bg=self.text_bg, fg=self.text_fg, padx=14, pady=12, highlightthickness=0,
-                            cursor="xterm", spacing1=2, spacing3=2, exportselection=True,
-                            selectbackground="#264f78" if self.dark else "#b3d4fc",
-                            inactiveselectbackground="#264f78" if self.dark else "#b3d4fc")
-        scroll = ttk.Scrollbar(body, orient="vertical", command=self.chat.yview)
-        self.chat.configure(yscrollcommand=scroll.set)
-        scroll.pack(side="right", fill="y")
-        self.chat.pack(side="left", fill="both", expand=True)
-        self.chat.bind("<Configure>", self._fit_column)
-        # Created first so h/bullet margins (later tags win) still indent inside the card.
-        self.chat.tag_configure("reply", background=reply_bg, lmargin1=14, lmargin2=14, rmargin=14,
-                                lmargincolor=reply_bg, rmargincolor=reply_bg)
-        self.chat.tag_configure("pad", font=("Segoe UI", 4))
-        self.chat.tag_configure("who", font=("Segoe UI Semibold", 9), foreground=self.muted, spacing1=22,
-                                spacing3=4)
-        self.chat.tag_configure("dot", foreground=accent)
-        self.chat.tag_configure("gap", font=("Segoe UI", 8))
-        self.chat.tag_configure("user_line", justify="right", lmargin1=120, lmargin2=120, spacing1=0,
-                                spacing3=0, font=("Segoe UI", 11))
-        self.chat.tag_configure("user", background=bubble, foreground="#ffffff", font=("Segoe UI", 11))
-        self.chat.tag_configure("h", font=("Segoe UI Semibold", 12), spacing1=12, spacing3=2,
-                                lmargin1=14, lmargin2=14)
-        self.chat.tag_configure("bullet", lmargin1=24, lmargin2=42, spacing1=3)
-        self.chat.tag_configure("b", font=("Segoe UI Semibold", 11))
-        self.chat.tag_configure("code", font=("Cascadia Mono", 10), background=code_bg)
-        self.chat.tag_configure("note", foreground=self.muted, font=("Segoe UI", 10, "italic"))
-        self.chat.tag_configure("error", foreground="#ff6b6b" if self.dark else "#c42b1c")
-        self.chat.tag_configure("working", foreground=accent, font=("Segoe UI", 10, "italic"))
-        # Read-only Text never takes focus on its own, so Ctrl+C would not reach it.
-        # Normal state so the mouse can select (a disabled Text will not), with every edit blocked here.
-        self.chat.bind("<Button-1>", lambda _e: self.chat.focus_set(), add="+")
-        self.chat.bind("<Key>", self._chat_key)
-        for event in ("<<Paste>>", "<<Cut>>", "<<Clear>>", "<<PasteSelection>>", "<Button-2>"):
-            self.chat.bind(event, lambda _e: "break")
-        self.chat.bind("<Control-c>", lambda _e: (self._copy_chat(), "break")[1])
-        self.chat.bind("<Control-a>", lambda _e: (self.chat.tag_add("sel", "1.0", "end-1c"), "break")[1])
-        menu = tk.Menu(self.root, tearoff=0)
-        menu.add_command(label="Copy", command=self._copy_chat)
-        menu.add_command(label="Select all", command=lambda: self.chat.tag_add("sel", "1.0", "end-1c"))
-        self.chat.bind("<Button-3>", lambda e: menu.tk_popup(e.x_root, e.y_root))
-        self._say_copilot(WELCOME)
+    def _js(self, fn, *args):
+        self.window.run_js(f"ui.{fn}({', '.join(json.dumps(a) for a in args)})")
 
-        # Developer log: everything the worker reports, hidden until Ctrl+Shift+D.
-        self.dev = tk.Toplevel(self.root)
-        self.dev.title("Developer log")
-        self.dev.geometry("720x480")
-        self.dev.withdraw()
-        self.dev.protocol("WM_DELETE_WINDOW", self.dev.withdraw)
-        self.log = tk.Text(self.dev, wrap="word", font=("Cascadia Mono", 9), relief="flat",
-                           bg=self.text_bg, fg=self.text_fg, padx=10, pady=8)
-        self.log.pack(fill="both", expand=True)
-        self.log.tag_configure("error", foreground="#ff6b6b" if self.dark else "#c42b1c")
-        self.root.bind_all("<Control-Shift-D>", lambda _e: self._toggle_dev())
-        self.root.bind_all("<Control-Shift-d>", lambda _e: self._toggle_dev())
-
-        self.overlay = Overlay(self.root, self._on_stop)
+    def _on_loaded(self):
+        if self._loaded:
+            return
+        self._loaded = True
+        threading.Thread(target=self._dispatch, daemon=True).start()
+        threading.Thread(target=self._glance, daemon=True).start()
         self.worker = threading.Thread(target=self._session, daemon=False)
         self.worker.start()
-        self.root.after(100, self._drain)
-        self.root.protocol("WM_DELETE_WINDOW", self._on_close)
-
-    def mainloop(self):
-        self.root.mainloop()
-
-    def _bg(self):
-        return ttk.Style().lookup("TFrame", "background") or ("#1c1c1c" if self.dark else "#fafafa")
 
     def _session(self):
         try:
@@ -350,281 +488,200 @@ class App:
                 say=lambda text: self.messages.put(("say", str(text))),
                 ask=lambda payload, reply: self.messages.put(("ask", (payload, reply))),
                 hands_on=lambda: self.messages.put(("hands_on", None)),
+                on_end=lambda: self.messages.put(("end", None)),
+                on_files=lambda paths: self.messages.put(("files", paths)),
             )
         finally:
             self.messages.put(("closed", None))
 
-    # ---- transcript ----
+    def set_glance_live(self, live):
+        """The page says whether the strip is actually on screen. A rising edge refreshes at once."""
+        live = bool(live)
+        if live and not self._glance_live:
+            self._glance_force = True
+            self.glance_now.set()
+        self._glance_live = live
 
-    def _write(self, runs):
-        for text, tags in runs:
-            self.chat.insert("end", text, tags)
-        self.chat.see("end")
+    def _glance(self):
+        """Read Outlook only while the strip is visible and this window is in front."""
+        last, shown = 0.0, False
+        while True:
+            self.glance_now.wait(1.5)
+            self.glance_now.clear()
+            force, self._glance_force = self._glance_force, False
+            visible = self.settings["glance"] != "off" and self._glance_live and self._focused()
+            if not visible:
+                shown = False
+                continue
+            if shown and not force and time.time() - last < self.settings["refresh"] * 60:
+                continue
+            try:
+                data = account.glance(end_hour=self.settings["workday_end"])
+                home = commute.card(self.settings)
+                if home:
+                    data["home"] = home
+                self._js("glance", data)
+                last = time.time()
+            except Exception as exc:
+                self._dev_log(f"Glance failed: {exc}")
+            shown = True
 
-    def _fit_column(self, event):
-        """Keep text in a centred ~780px reading column however wide the window is."""
-        pad = max(16, (event.width - 780) // 2)
-        if int(self.chat.cget("padx")) != pad:
-            self.chat.configure(padx=pad)
-            self.bottom.pack_configure(padx=(max(0, pad - 16), max(0, pad - 16) + 18))
+    # ---- page calls ----
 
-    _NAV_KEYS = {"Left", "Right", "Up", "Down", "Home", "End", "Prior", "Next", "Shift_L", "Shift_R",
-                 "Control_L", "Control_R"}
+    def start(self, task):
+        task = task.strip()
+        if not task or self.busy:
+            return False
+        self.busy, self._answered, self._last_error, self._hands_on = True, False, "", False
+        self._last_answer = ""
+        self._started_at = time.time()
+        self._dev_log(f"▶ {task}")
+        self.tasks.put(task)
+        return True
 
-    def _chat_key(self, event):
-        """Read-only transcript: allow copy, select-all, and moving or extending the selection."""
-        ctrl = event.state & 0x4
-        if event.keysym in self._NAV_KEYS or (ctrl and event.keysym.lower() in ("c", "a", "insert")):
-            return None
-        return "break"
+    def on_stop(self):
+        self.stop.set()
+        self.messages.put(("status", "Stopping"))
 
-    def _copy_chat(self):
-        try:
-            text = self.chat.get("sel.first", "sel.last")
-        except tk.TclError:
+    def reply(self, card_id, answer):
+        reply = self.replies.pop(int(card_id), None)
+        if reply is None:
             return
-        self.root.clipboard_clear()
-        self.root.clipboard_append("\n".join(line.strip() for line in text.replace("\u200b", "").split("\n")).strip())
-
-    def _say_user(self, text):
-        # Tk paints a tag's background out to the margin when it covers a line's first character
-        # and through line spacing, so each line starts with an untagged zero-width space and the gap
-        # above is its own small line.
-        runs = [("\n", ("gap",))]
-        for line in text.strip().split("\n"):
-            runs += [("\u200b", ("user_line",)), (f"  {line}  ", ("user_line", "user")), ("\n", ("user_line",))]
-        self._write(runs)
-
-    def _say_copilot(self, text, tag=None):
-        runs = [("● ", ("who", "dot")), (f"{APP_NAME}\n", ("who",))]
-        body = [(t, ("reply",) + tags + ((tag,) if tag else ())) for t, tags in markdown_runs(text.strip())]
-        self._write(runs + [("\n", ("reply", "pad"))] + body + [("\n", ("reply", "pad"))])
-
-    def _working(self, label):
-        ranges = self.chat.tag_ranges("working")
-        if ranges:
-            self.chat.delete(ranges[0], ranges[-1])
-        if label:
-            self.chat.insert("end", label + "\n", ("working",))
-        self.chat.see("end")
-
-    def _new_conversation(self):
-        if self._busy:
+        if not isinstance(answer, dict):
+            reply.put(None)
             return
-        self.chat.delete("1.0", "end")
-        self._say_copilot(WELCOME)
+        choices = [str(c) for c in answer.get("choices") or []]
+        reply.put({"choices": choices, "text": str(answer.get("text") or "").strip()})
+        if self._hands_on:
+            self.overlay.show()
+            time.sleep(0.3)
+            self._park()
 
-    # ---- developer log ----
-
-    def _toggle_dev(self):
-        if self.dev.state() == "withdrawn":
-            self.dev.deiconify()
-            self.dev.lift()
-        else:
-            self.dev.withdraw()
+    # ---- worker messages ----
 
     def _dev_log(self, message):
         is_error = message.startswith(("Error", "Action failed", "No action after"))
         if is_error:
             self._last_error = message
-        self.log.insert("end", time.strftime("%H:%M:%S  ") + message + "\n", ("error",) if is_error else ())
-        self.log.see("end")
+        self._js("log", time.strftime("%H:%M:%S  ") + message, is_error)
 
-    # ---- controls ----
+    def _hwnd(self):
+        return ctypes.windll.user32.FindWindowW(None, APP_NAME)
 
-    def _show_hint(self):
-        if not self.task.get("1.0", "end").strip():
-            self.task.insert("1.0", HINT, "hint")
-
-    def _clear_hint(self):
-        if self.task.tag_ranges("hint"):
-            self.task.delete("1.0", "end")
-
-    def _task_text(self):
-        return "" if self.task.tag_ranges("hint") else self.task.get("1.0", "end").strip()
-
-    def _start(self):
-        task = self._task_text()
-        if not task or str(self.start_btn["state"]) == "disabled":
+    def _park(self):
+        """Minimise while working, remembering the size the user chose."""
+        if not self.hide or self._parked:
             return
-        self.task.delete("1.0", "end")
-        self.start_btn.configure(state="disabled")
-        self.stop_btn.configure(state="normal")
-        self._busy, self._answered, self._last_error = True, False, ""
-        self._started_at = time.time()
-        self._say_user(task)
-        self._working("Working on it…")
-        self._dev_log(f"▶ {task}")
-        self._hands_on = False
-        self.tasks.put(task)
+        user32 = ctypes.windll.user32
+        hwnd = self._hwnd()
+        self._was_maximized = bool(hwnd and user32.IsZoomed(hwnd))
+        if hwnd and not self._was_maximized:
+            rect = ctypes.wintypes.RECT()
+            user32.GetWindowRect(hwnd, ctypes.byref(rect))
+            self._bounds = (rect.left, rect.top, rect.right - rect.left, rect.bottom - rect.top)
+        self._parked = True
+        self.window.minimize()
 
-    def _on_stop(self):
-        self.stop.set()
-        self._set_status("Stopping")
-
-    def _set_status(self, message):
-        self.status.set(message)
-        self.dot.itemconfigure(self.dot_id, fill=_dot_colour(message))
-        if self._busy and message.startswith("Step"):
-            self._working(f"Working on it… ({message.lower()})")
-
-    def _ask_card(self, payload, reply):
-        """Question card in the transcript: radio buttons or checkboxes, an optional details box, Submit / Skip."""
+    def _bring_back(self):
+        """Show the window again. Only touch it if we minimised it, and put back the exact size."""
         self.overlay.hide()
-        self.root.deiconify()
-        self.root.lift()
-        self._working(None)
-        self._dev_log("Ask: " + payload["question"])
-        self.root.update_idletasks()
-        room = self.chat.winfo_width() - 2 * int(self.chat.cget("padx")) - 40
-        wrap = min(740, room) if room > 300 else 640
-        frame = tk.Frame(self.chat, bg=self.card, padx=16, pady=14, highlightthickness=1,
-                         highlightbackground=self.accent)
-        tk.Label(frame, text=payload["question"], bg=self.card, fg=self.text_fg, font=("Segoe UI Semibold", 11),
-                 wraplength=wrap, justify="left").pack(anchor="w", pady=(0, 8))
-        choice, checks = tk.StringVar(value=""), []
-        for option in payload["options"]:
-            if payload["multi"]:
-                var = tk.BooleanVar(value=False)
-                checks.append((option, var))
-                widget = tk.Checkbutton(frame, text=option, variable=var)
-            else:
-                widget = tk.Radiobutton(frame, text=option, value=option, variable=choice)
-            widget.configure(bg=self.card, fg=self.text_fg, selectcolor=self.text_bg, activebackground=self.card,
-                             activeforeground=self.text_fg, font=("Segoe UI", 10), wraplength=wrap, justify="left",
-                             anchor="w", highlightthickness=0, cursor="hand2")
-            widget.pack(anchor="w", fill="x", pady=1)
-        details = None
-        if payload["allow_text"]:
-            tk.Label(frame, text="Describe more (optional)" if payload["options"] else "Your answer",
-                     bg=self.card, fg=self.muted, font=("Segoe UI", 9)).pack(anchor="w", pady=(8, 2))
-            details = tk.Text(frame, height=2, width=60, wrap="word", font=("Segoe UI", 10), relief="flat",
-                              bg=self.text_bg, fg=self.text_fg, insertbackground=self.text_fg, padx=8, pady=6,
-                              highlightthickness=1, highlightbackground="#4a6a8f", highlightcolor=self.accent)
-            details.pack(anchor="w", fill="x")
-        buttons = ttk.Frame(frame)
-        buttons.pack(anchor="e", pady=(10, 0))
-        result = tk.Label(frame, bg=self.card, fg=self.muted, font=("Segoe UI", 9, "italic"), wraplength=wrap,
-                          justify="left")
+        if not self._parked:
+            return
+        self._parked = False
+        if self._was_maximized:
+            self.window.maximize()
+            return
+        self.window.restore()
+        hwnd, bounds = self._hwnd(), getattr(self, "_bounds", None)
+        if hwnd and bounds:
+            ctypes.windll.user32.SetWindowPos(hwnd, None, *bounds, 0x0014)
 
-        def close(answer):
-            if self._open_card is not frame:
-                return
-            self._open_card = None
-            picked = [o for o, v in checks if v.get()] if payload["multi"] else ([choice.get()] if choice.get() else [])
-            for child in frame.winfo_children():
-                if isinstance(child, (tk.Radiobutton, tk.Checkbutton, tk.Text)):
-                    child.configure(state="disabled")
-            buttons.pack_forget()
-            if answer is None:
-                result.configure(text="Skipped")
+    def _dispatch(self):
+        while True:
+            kind, message = self.messages.get()
+            try:
+                self._handle(kind, message)
+            except Exception as exc:
+                print(f"UI update failed ({kind}): {exc}")
+
+    def _handle(self, kind, message):
+        if kind == "status":
+            self._status = message
+            self._js("status", message)
+            if message.startswith("Sign in"):
+                self._bring_back()
+        elif kind == "hands_on":
+            self._hands_on = True
+            self._js("step", "Using the mouse and keyboard")
+            self.overlay.show()
+            self._park()
+        elif kind == "log":
+            self._dev_log(message)
+            if message.startswith("Action: "):
+                try:
+                    label = describe(json.loads(message[8:]))
+                except ValueError:
+                    label = None
+                if label:
+                    self._js("step", label)
+        elif kind == "say":
+            self._js("say", markdown_html(message))
+            self._dev_log("Say: " + message)
+        elif kind == "ask":
+            payload, reply = message
+            card_id = next(self._ids)
+            self.replies[card_id] = reply
+            self._bring_back()
+            self._dev_log("Ask: " + payload["question"])
+            self._js("ask", card_id, payload)
+        elif kind == "end":
+            self._answered = True
+            self._js("end")
+        elif kind == "answer":
+            self._answered = True
+            self._last_answer = message
+            self._js("answer", markdown_html(message))
+            self._dev_log("Answer: " + message)
+        elif kind == "files":
+            self._made.update(message)
+            self._js("files", [{"path": p, "name": Path(p).name, "folder": str(Path(p).parent),
+                                "size": files.size_text(p)} for p in message])
+        elif kind == "idle":
+            away = not self._focused()
+            self._bring_back()
+            if self.busy:
+                self._finish_task(away)
+            for reply in self.replies.values():
                 reply.put(None)
-            else:
-                text = details.get("1.0", "end").strip() if details else ""
-                result.configure(text="You answered: " + "; ".join(picked + ([text] if text else [])))
-                reply.put({"choices": picked, "text": text})
-            result.pack(anchor="w", pady=(8, 0))
-            self._working("Working on it…")
-            if self._hands_on:
-                self.overlay.show()
-                if self.minimize.get():
-                    self.root.after(300, self.root.iconify)
+            self.replies.clear()
+            self._js("idle")
+        elif kind == "closed":
+            self.overlay.hide()
+            if self._last_error and self._status == "Error":
+                self._js("error", markdown_html(f"{APP_NAME} couldn't start. Close any other copy of this app and "
+                                                f"reopen it.\n`{self._last_error[:300]}`"))
+            self._js("closed")
 
-        def submit():
-            picked = any(v.get() for _o, v in checks) or choice.get()
-            typed = details is not None and details.get("1.0", "end").strip()
-            if payload["options"] and not picked and not typed:
-                result.configure(text="Pick an option or describe what you want.")
-                result.pack(anchor="w", pady=(8, 0))
-                return
-            close({})
+    def _focused(self):
+        hwnd = self._hwnd()
+        return bool(hwnd and ctypes.windll.user32.GetForegroundWindow() == hwnd)
 
-        ttk.Button(buttons, text="Skip", command=lambda: close(None)).pack(side="left", padx=(0, 8))
-        ttk.Button(buttons, text="Submit", style="Accent.TButton", command=submit).pack(side="left")
-        self._open_card = frame
-        self._write([("● ", ("who", "dot")), (f"{APP_NAME} needs your input\n", ("who",))])
-        self.chat.window_create("end", window=frame)
-        self.chat.insert("end", "\n")
-        self.chat.see("end")
-        if details is not None and not payload["options"]:
-            details.focus_set()
-
-    def _finish_task(self):
-        if self._open_card is not None:
-            for child in self._open_card.winfo_children():
-                if isinstance(child, (tk.Radiobutton, tk.Checkbutton, tk.Text)):
-                    child.configure(state="disabled")
-            self._open_card = None
-        self._working(None)
+    def _finish_task(self, away=False):
+        if away and self.settings["notify"] and self._answered and self._last_answer:
+            threading.Thread(target=_toast, args=(self._last_answer,), daemon=True).start()
         if not self._answered:
-            status = self.status.get().lower()
-            if status.startswith("stopped"):
-                self._say_copilot("Stopped. Nothing else will be done for this request.", "note")
+            if self._status.lower().startswith("stopped"):
+                self._js("note", markdown_html("Stopped. Nothing else will be done for this request."))
             else:
                 reason = self._last_error or f"{APP_NAME} didn't finish this request."
-                self._say_copilot(f"Sorry, that didn't work.\n{reason}", "error")
-        self._write([(f"{time.time() - self._started_at:.0f}s\n", ("note",))])
-        self._busy = False
-
-    def _drain(self):
-        try:
-            while True:
-                kind, message = self.messages.get_nowait()
-                if kind == "status":
-                    self._set_status(message)
-                    if message.startswith("Sign in"):
-                        self.overlay.hide()
-                        self.root.deiconify()
-                elif kind == "hands_on":
-                    self._hands_on = True
-                    self._working("Using the mouse and keyboard…")
-                    self.overlay.show()
-                    if self.minimize.get():
-                        self.root.iconify()
-                elif kind == "log":
-                    self._dev_log(message)
-                elif kind == "say":
-                    self._working(None)
-                    self._say_copilot(message)
-                    self._working("Working on it…")
-                    self._dev_log("Say: " + message)
-                elif kind == "ask":
-                    self._ask_card(*message)
-                elif kind == "answer":
-                    self._answered = True
-                    self._working(None)
-                    self._say_copilot(message)
-                    self._dev_log("Answer: " + message)
-                elif kind == "idle":
-                    self.overlay.hide()
-                    if self._busy:
-                        self._finish_task()
-                    self.start_btn.configure(state="normal")
-                    self.stop_btn.configure(state="disabled")
-                    self.root.deiconify()
-                elif kind == "closed":
-                    self.overlay.hide()
-                    if self._last_error and self.status.get() == "Error":
-                        self._say_copilot(f"{APP_NAME} couldn't start. Close any other copy of this app and reopen it.\n"
-                                          f"`{self._last_error[:300]}`", "error")
-                    self.start_btn.configure(state="disabled")
-                    self.stop_btn.configure(state="disabled")
-        except queue.Empty:
-            pass
-        if self.root.winfo_exists():
-            self.root.after(100, self._drain)
+                self._js("error", markdown_html(f"That didn't work.\n{reason}"))
+        self._js("took", round(time.time() - self._started_at))
+        self.busy = False
 
     def _on_close(self):
         self.stop.set()
         self.tasks.put(None)
-        self._set_status("Closing")
-        self._finish_close()
-
-    def _finish_close(self):
-        if self.worker.is_alive():
-            self.root.after(200, self._finish_close)
-            return
-        self.root.destroy()
+        self.overlay.close()
 
 
 def _check():
@@ -635,8 +692,24 @@ def _check():
     assert runs[-2:] == [("plain", ()), ("\n", ())], runs
     inline = "".join(t for t, _ in markdown_runs("Two windows: - 'Intranet - Work - Edge' (8 tabs) - 'Dashboard - Edge'"))
     assert inline == "Two windows:\n•  'Intranet - Work - Edge' (8 tabs)\n•  'Dashboard - Edge'\n", inline
-    print("app markdown ok")
+    page = markdown_html("## Top\n- **msedge** uses `940 MB`\n1. first\n<b>x</b>")
+    assert page == ('<p class="h">Top</p><p class="li"><strong>msedge</strong> uses <code>940 MB</code></p>'
+                    '<p class="ol">1. first</p><p>&lt;b&gt;x&lt;/b&gt;</p>'), page
+    assert describe({"action": "open_app", "name": "Notepad"}) == "Opening Notepad"
+    assert describe({"action": "done", "summary": "x"}) is None
+    assert clean_settings({"theme": "dark", "hide": "yes", "workday_end": 99, "refresh": True, "x": 1}) == dict(
+        DEFAULTS, theme="dark")
+    assert clean_settings(None) == DEFAULTS
+    assert clean_settings({})["notify"] is False
+    assert clean_settings({"glance": True})["glance"] == "first"
+    assert clean_settings({"glance": False})["glance"] == "off"
+    assert clean_settings({"accent": "red", "home_address": "  1 Main  St \n"})["accent"] == "#3c6e71"
+    assert clean_settings({"home_address": "  1 Main  St "})["home_address"] == "1 Main St"
+    linked = markdown_html("The next train is 3:34 PM.\nSource: [GO Transit](https://www.gotransit.com/en).")
+    assert 'href="https://www.gotransit.com/en"' in linked and ">GO Transit</a>" in linked, linked
+    assert _plain("**3:34** from [GO Transit](https://www.gotransit.com).") == "3:34 from GO Transit."
+    print("app ok")
 
 
 if __name__ == "__main__":
-    App().mainloop()
+    App().run()
