@@ -24,10 +24,12 @@ import desktop
 import files
 import loop
 
-APP_NAME = "Co-opilot"
+APP_NAME = "Copilot Assistant"
 SIDE_W = 520
 UI = Path(__file__).with_name("ui.html")
-SETTINGS_FILE = Path(os.environ.get("APPDATA") or Path.home()) / APP_NAME / "settings.json"
+LOGO = Path(__file__).resolve().parent / "public" / "copilot-logo.png"
+# The folder name stays, so a rename of the window does not hide settings already saved.
+SETTINGS_FILE = Path(os.environ.get("APPDATA") or Path.home()) / "Co-opilot" / "settings.json"
 _HEX = re.compile(r"^#[0-9a-fA-F]{6}$")
 CHOICES = {
     "theme": ("system", "light", "dark"),
@@ -89,7 +91,7 @@ def _toast(text):
     """One Windows notification. Shows under PowerShell because this app is not an installed package."""
     body = html.escape(_plain(text)[:160] or "Your answer is ready.").replace("'", "&apos;")
     script = (
-        "$xml = '<toast><visual><binding template=\"ToastGeneric\"><text>Co-opilot</text><text>"
+        "$xml = '<toast><visual><binding template=\"ToastGeneric\"><text>" + html.escape(APP_NAME) + "</text><text>"
         + body + "</text></binding></visual></toast>';"
         "$doc = [Windows.Data.Xml.Dom.XmlDocument, Windows.Data.Xml.Dom.XmlDocument, ContentType = WindowsRuntime]::New();"
         "$doc.LoadXml($xml);"
@@ -440,6 +442,8 @@ class App:
         self.window.events.closing += self._on_close
 
     def run(self):
+        # Without an explicit app id, Windows pins this window to python.exe and keeps the Python icon.
+        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("Copilot.Assistant")
         webview.start()
 
     @property
@@ -470,6 +474,7 @@ class App:
         if self._loaded:
             return
         self._loaded = True
+        self._brand_icon()
         threading.Thread(target=self._dispatch, daemon=True).start()
         threading.Thread(target=self._glance, daemon=True).start()
         self.worker = threading.Thread(target=self._session, daemon=False)
@@ -564,6 +569,28 @@ class App:
         if is_error:
             self._last_error = message
         self._js("log", time.strftime("%H:%M:%S  ") + message, is_error)
+
+    def _brand_icon(self):
+        """Title-bar and taskbar icon from the Copilot logo. Handles are kept so Windows does not drop them."""
+        hwnd = self._hwnd()
+        if not hwnd or not LOGO.is_file():
+            return
+        try:
+            from PIL import Image
+            ico = Path(os.environ.get("TEMP") or ".") / "CopilotAssistant.ico"
+            if not ico.exists() or ico.stat().st_mtime < LOGO.stat().st_mtime:
+                Image.open(LOGO).save(ico, format="ICO", sizes=[(16, 16), (32, 32), (48, 48), (256, 256)])
+        except OSError:
+            return
+        user32 = ctypes.windll.user32
+        big = user32.LoadImageW(None, str(ico), 1, 32, 32, 0x10)
+        small = user32.LoadImageW(None, str(ico), 1, 16, 16, 0x10)
+        if big:
+            user32.SendMessageW(hwnd, 0x80, 1, big)
+            self._icon_big = big
+        if small:
+            user32.SendMessageW(hwnd, 0x80, 0, small)
+            self._icon_small = small
 
     def _hwnd(self):
         return ctypes.windll.user32.FindWindowW(None, APP_NAME)

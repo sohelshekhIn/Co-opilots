@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="color-scheme" content="light dark">
-<title>Co-opilot</title>
+<title>Copilot Assistant</title>
 <style>
 :root{
   --bg:#f3f3f1;--card:#fff;--hover:#e9e9e6;--ink:#111;--muted:#5c5c5a;--rule:#d9d9d5;--red:#c4161c;--red-ink:#fff;
@@ -51,7 +51,8 @@ kbd{font:12px var(--mono);color:var(--muted);border:1px solid var(--rule);border
 
 /* header */
 header{display:flex;align-items:center;gap:8px;padding:12px var(--gutter);border-bottom:1px solid var(--rule);box-shadow:inset 0 2px 0 var(--accent)}
-header h1{font:600 15px var(--display);letter-spacing:-.01em;margin-right:6px}
+header h1{display:flex;align-items:center;gap:8px;font:600 15px var(--display);letter-spacing:-.01em;margin-right:6px}
+header h1 img{width:22px;height:22px}
 .state{display:flex;align-items:center;gap:7px;min-width:0;font-size:12.5px;color:var(--muted)}
 .state span{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .state i{width:7px;height:7px;background:var(--muted);flex:none}
@@ -208,7 +209,7 @@ select,.set input[type=text],.set input:not([type]){font:13px var(--sans);color:
 </head>
 <body>
 <header>
-  <h1>Co-opilot</h1>
+  <h1><img src="public/copilot-logo.png" alt="" width="22" height="22">Copilot Assistant</h1>
   <p class="state" id="state" data-s="busy" role="status"><i></i><span id="stateText">Starting</span></p>
   <button class="btn icon" id="setBtn" type="button" aria-label="Settings" title="Settings (Ctrl+,)" aria-expanded="false" aria-controls="settings">
     <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" aria-hidden="true"><path d="M2 4.5h7M12 4.5h2M2 11.5h2M7 11.5h7"/><circle cx="10.5" cy="4.5" r="1.6"/><circle cx="5.5" cy="11.5" r="1.6"/></svg></button>
@@ -278,7 +279,7 @@ select,.set input[type=text],.set input:not([type]){font:13px var(--sans);color:
           <label><input type="radio" name="text" value="larger"><span>Larger</span></label></div></div>
     </div></div>
     <div class="set"><h3>While working</h3><div>
-      <div class="opt-row"><p><label for="sHide">Hide this window</label><small>Minimise Co-opilot while it uses your mouse and keyboard.</small></p>
+      <div class="opt-row"><p><label for="sHide">Hide this window</label><small>Minimise Copilot Assistant while it uses your mouse and keyboard.</small></p>
         <label class="switch"><input type="checkbox" role="switch" id="sHide" name="hide"></label></div>
       <div class="opt-row"><p><label for="sNotify">Notify when an answer is ready</label><small>A Windows notification when this window is not in front.</small></p>
         <label class="switch"><input type="checkbox" role="switch" id="sNotify" name="notify"></label></div>
@@ -319,7 +320,7 @@ select,.set input[type=text],.set input:not([type]){font:13px var(--sans);color:
 </section>
 
 <form class="composer" id="composer">
-  <label class="sr" for="input">Message Co-opilot</label>
+  <label class="sr" for="input">Message Copilot Assistant</label>
   <textarea id="input" rows="2" placeholder="Getting ready…" disabled></textarea>
   <div class="crow">
     <label class="switch"><input type="checkbox" role="switch" id="hide" checked> Hide while working</label>
@@ -369,7 +370,7 @@ function body(html, cls) {
 function setComposer() {
   const can = ready && !busy;
   input.disabled = !can;
-  input.placeholder = busy ? "Co-opilot is working. Press Esc to stop." : ready ? "Ask, or tell me what to do on this PC" : "Getting ready…";
+  input.placeholder = busy ? "Copilot Assistant is working. Press Esc to stop." : ready ? "Ask, or tell me what to do on this PC" : "Getting ready…";
   $("sendBtn").disabled = !can || !input.value.trim();
   $("newBtn").disabled = !can;
   $("stopBtn").hidden = !busy; $("newBtn").hidden = busy;
@@ -386,7 +387,7 @@ function send(text) {
   const you = el("div"); you.append(body("", "you")); you.firstChild.textContent = text;
   row("You", you);
   turn = el("div"); steps = el("ul", "steps"); turn.append(steps);
-  row("Co-opilot", turn);
+  row("Copilot Assistant", turn);
   step("Working on it");
   api("send", text);
 }
@@ -407,7 +408,7 @@ function settle() {
   if (last && last.dataset.label === "Working on it" && steps.children.length === 1) last.remove();
   else if (last) { last.classList.remove("now"); last.querySelector("i").innerHTML = ICON.done; }
 }
-function reply(html, cls) { settle(); (turn || row("Co-opilot", el("div"))).append(body(html, cls)); scroll(); }
+function reply(html, cls) { settle(); (turn || row("Copilot Assistant", el("div"))).append(body(html, cls)); scroll(); }
 
 function fit() { input.style.height = "auto"; input.style.height = Math.min(input.scrollHeight, 160) + "px"; }
 
@@ -453,10 +454,10 @@ window.ui = {
       act("Copy file", b => { api("file_op", "copy_file", f.path); b.textContent = "Copied, paste anywhere"; setTimeout(() => b.textContent = "Copy file", 1600); });
       li.append(open, meta, acts); box.append(li);
     }
-    (turn || row("Co-opilot", el("div"))).append(box); scroll();
+    (turn || row("Copilot Assistant", el("div"))).append(box); scroll();
   },
   took(seconds) { turn && turn.append(el("p", "took", seconds + " s")); },
-  closed() { ready = false; busy = false; setComposer(); input.placeholder = "Co-opilot has stopped. Close and reopen it."; },
+  closed() { ready = false; busy = false; setComposer(); input.placeholder = "Copilot Assistant has stopped. Close and reopen it."; },
   log(line, isError) {
     const pre = $("logText"), s = el("span", isError ? "e" : null, line + "\n");
     pre.append(s); if (pre.childNodes.length > 2000) pre.firstChild.remove();
@@ -515,7 +516,7 @@ function askCard(id, p) {
     if (p.options.length && !opts.some(i => i.checked) && !(txt && txt.value.trim())) { msg.textContent = "Pick an option or describe what you want."; return; }
     close(true);
   };
-  (turn || row("Co-opilot", el("div"))).append(box); scroll();
+  (turn || row("Copilot Assistant", el("div"))).append(box); scroll();
   (opts[0] || txt || ok).focus();
 }
 
