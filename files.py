@@ -1,10 +1,13 @@
-"""File skills: list folders, read documents (text, CSV, Excel, Word), and write text, CSV, or Excel files."""
+"""File skills: list folders, read documents (text, CSV, Excel, Word), and write text, CSV, Excel, Word, or PDF files."""
 
 import csv
 import html
 import io
 import os
 import re
+import shutil
+import subprocess
+import tempfile
 import time
 import zipfile
 from pathlib import Path
@@ -14,6 +17,7 @@ import openpyxl
 from desktop import _RUNNABLE
 
 READ_LIMIT = 6000
+touched = []  # files written during the current task, shown to the user as cards
 _TEXT = {".txt", ".md", ".csv", ".tsv", ".json", ".xml", ".html", ".htm", ".log", ".ini", ".cfg", ".yaml", ".yml",
          ".py", ".js", ".ts", ".ps1", ".sql", ".cs", ".java", ".css", ".bat", ".cmd", ".sh", ".toml", ".env"}
 
@@ -95,6 +99,10 @@ def write_file(path, content=None, rows=None, mode="create"):
         for row in rows or _text_rows(content):
             ws.append([_excel_value(v) for v in row])
         book.save(target)
+    elif suffix == ".pdf":
+        _write_pdf(target, content if content is not None else "\n".join("	".join(map(str, r)) for r in rows or []))
+    elif suffix == ".docx":
+        _write_docx(target, content or "")
     elif suffix == ".csv" and rows is not None:
         with target.open("a" if mode == "append" else "w", newline="", encoding="utf-8-sig") as file:
             csv.writer(file).writerows(rows)
@@ -102,7 +110,68 @@ def write_file(path, content=None, rows=None, mode="create"):
         text = content if content is not None else "\n".join("\t".join(map(str, r)) for r in rows or [])
         with target.open("a" if mode == "append" else "w", encoding="utf-8") as file:
             file.write(text)
+    if target not in touched:
+        touched.append(target)
     return f"{'appended to' if mode == 'append' else 'wrote'} {target} ({_size(target.stat().st_size)})"
+
+
+def _html_doc(content):
+    """HTML passes through; plain text becomes headed paragraphs."""
+    if content.lstrip()[:1] == "<":
+        return content
+    out = []
+    for line in content.splitlines():
+        text = html.escape(line.strip())
+        if text.startswith("# "):
+            out.append(f"<h1>{text[2:]}</h1>")
+        elif text.startswith("## "):
+            out.append(f"<h2>{text[3:]}</h2>")
+        elif text.startswith(("- ", "* ")):
+            out.append(f"<li>{text[2:]}</li>")
+        elif text:
+            out.append(f"<p>{text}</p>")
+    return ("<!doctype html><meta charset=utf-8><style>body{font:11pt 'Segoe UI',sans-serif;margin:2cm;line-height:1.5}"
+            "h1{font-size:20pt}h2{font-size:14pt;margin-top:1.2em}</style>" + "\n".join(out))
+
+
+def _edge():
+    for base in (os.environ.get("ProgramFiles(x86)"), os.environ.get("ProgramFiles")):
+        exe = Path(base or "") / "Microsoft/Edge/Application/msedge.exe"
+        if exe.is_file():
+            return str(exe)
+    return shutil.which("msedge")
+
+
+def _write_pdf(target, content):
+    """Print HTML to PDF with Edge (already on every work PC). A throwaway profile avoids clashing with the chat's Edge."""
+    edge = _edge()
+    if not edge:
+        raise ValueError("Microsoft Edge was not found, so PDFs cannot be made on this PC")
+    with tempfile.TemporaryDirectory() as tmp:
+        page = Path(tmp) / "doc.html"
+        page.write_text(_html_doc(content), encoding="utf-8")
+        target.unlink(missing_ok=True)
+        subprocess.run([edge, "--headless", "--disable-gpu", "--no-pdf-header-footer", f"--user-data-dir={Path(tmp) / 'p'}",
+                        f"--print-to-pdf={target}", page.as_uri()], timeout=90, capture_output=True,
+                       creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+    if not target.is_file() or target.stat().st_size == 0:
+        raise ValueError("Edge did not produce the PDF")
+
+
+def _write_docx(target, content):
+    import docx
+    doc = docx.Document()
+    for line in content.splitlines():
+        text = line.strip()
+        if text.startswith("# "):
+            doc.add_heading(text[2:], 1)
+        elif text.startswith("## "):
+            doc.add_heading(text[3:], 2)
+        elif text.startswith(("- ", "* ")):
+            doc.add_paragraph(text[2:], style="List Bullet")
+        elif text:
+            doc.add_paragraph(text)
+    doc.save(target)
 
 
 def _read_excel(target, sheet):
@@ -154,6 +223,10 @@ def _excel_value(value):
     return value
 
 
+def size_text(path):
+    return _size(Path(path).stat().st_size)
+
+
 def _size(n):
     for unit in ("B", "KB", "MB", "GB"):
         if n < 1024 or unit == "GB":
@@ -186,6 +259,11 @@ def _check():
     except ValueError:
         pass
     assert "items.xlsx" in list_dir(folder)
+    write_file(folder / "r.docx", "# Title\n- point\nBody")
+    assert "Title" in read_file(folder / "r.docx")
+    pdf = folder / "r.pdf"
+    write_file(pdf, "<h1>Bell curve</h1><svg width=200 height=80><path d='M0 80 C80 80 80 0 100 0 S120 80 200 80' fill=none stroke=black /></svg>")
+    assert pdf.read_bytes()[:4] == b"%PDF" and pdf in touched
     print("files ok")
 
 
