@@ -27,7 +27,7 @@ import loop
 APP_NAME = "Copilot Assistant"
 SIDE_W = 520
 UI = Path(__file__).with_name("ui.html")
-LOGO = Path(__file__).resolve().parent / "public" / "copilot-logo.png"
+LOGO = Path(__file__).resolve().parent / "public" / "assistant-logo-2.png"
 # The folder name stays, so a rename of the window does not hide settings already saved.
 SETTINGS_FILE = Path(os.environ.get("APPDATA") or Path.home()) / "Co-opilot" / "settings.json"
 _HEX = re.compile(r"^#[0-9a-fA-F]{6}$")
@@ -35,6 +35,7 @@ CHOICES = {
     "theme": ("system", "light", "dark"),
     "text": ("default", "large", "larger"),
     "hide": (True, False),
+    "pinned": (True, False),
     "glance": ("first", "collapse", "stay", "off"),
     "suggestions": (True, False),
     "notify": (True, False),
@@ -43,7 +44,7 @@ CHOICES = {
     "home_mode": ("off", "drive", "train"),
     "go_line": commute.LINES,
 }
-DEFAULTS = {"theme": "system", "text": "default", "hide": True, "glance": "first", "suggestions": True,
+DEFAULTS = {"theme": "system", "text": "default", "hide": True, "pinned": False, "glance": "first", "suggestions": True,
             "notify": False, "workday_end": 17, "refresh": 5, "accent": "#3c6e71",
             "home_mode": "off", "home_address": "", "go_line": "Kitchener", "go_stop": ""}
 
@@ -66,6 +67,9 @@ def clean_settings(raw):
             out[key] = got
         else:
             out[key] = value
+    # A pinned window must remain visible while the assistant is working.
+    if out["pinned"]:
+        out["hide"] = False
     return out
 
 
@@ -228,14 +232,14 @@ class Overlay:
         for l, t, r, b, _primary in screens:
             l, t, r, b = l - vx, t - vy, r - vx, b - vy
             canvas.create_rectangle(l + 2, t + 2, r - 2, b - 2, outline=self.ACCENT, width=3)
-            pill_w, pill_h, top = 560, 60, t + 28
+            pill_w, pill_h, top = min(620, r - l - 40), 60, t + 28
             left = l + (r - l - pill_w) // 2
             canvas.create_rectangle(left, top, left + pill_w, top + pill_h, fill="#111111", outline="#2b2b2b")
             canvas.create_rectangle(left + 20, top + 26, left + 27, top + 33, fill=self.ACCENT, outline="")
             canvas.create_text(left + 42, top + 20, anchor="w", fill="#ececec",
                                text=f"{APP_NAME} is using your computer", font=("Segoe UI Semibold", 12))
             canvas.create_text(left + 42, top + 41, anchor="w", fill="#a0a0a0",
-                               text="Hands off the mouse and keyboard, or press Stop to take over",
+                               text="Select Stop at any time to take back control.",
                                font=("Segoe UI", 9))
             # Separate small window: the overlay itself must stay click-through.
             stop = tk.Toplevel(root, bg=self.ACCENT)
@@ -313,14 +317,9 @@ class Overlay:
             self._fade = min(1.0, self._fade + 0.125)
             eased = 1 - (1 - self._fade) ** 3
             self.tint.attributes("-alpha", 0.04 + (self.TINT - 0.04) * eased)
+            self.root.after(50, self._pulse)
         else:
             self.tint.attributes("-alpha", self.TINT)
-        self.tint.attributes("-topmost", True)
-        self.chrome.attributes("-topmost", True)
-        for stop, _label in self.stops:
-            stop.attributes("-topmost", True)
-            stop.lift()
-        self.root.after(50 if self._fade < 1 else 400, self._pulse)
 
 
 class OverlayThread:
@@ -415,6 +414,9 @@ class Api:
 
 class App:
     def __init__(self):
+        # Windows reads the app identity when the first native window is created.
+        # Versioning it also avoids a stale taskbar icon cached under the old identity.
+        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("Copilot.Assistant.v3")
         self.messages = queue.Queue()
         self.tasks = queue.Queue()
         self.stop = threading.Event()
@@ -439,11 +441,10 @@ class App:
             APP_NAME, UI.as_uri(), js_api=Api(self), width=SIDE_W, height=820, min_size=(420, 560),
             background_color="#0e0e0e" if self._dark() else "#f3f3f1")
         self.window.events.loaded += self._on_loaded
+        self.window.events.shown += self._brand_icon
         self.window.events.closing += self._on_close
 
     def run(self):
-        # Without an explicit app id, Windows pins this window to python.exe and keeps the Python icon.
-        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("Copilot.Assistant")
         webview.start()
 
     @property
@@ -461,6 +462,8 @@ class App:
             save_settings(self.settings)
         except OSError as exc:
             self._dev_log(f"Error: settings not saved: {exc}")
+        if old.get("pinned") != self.settings["pinned"]:
+            self._set_pinned(self.settings["pinned"])
         watched = ("workday_end", "glance", "refresh", "home_mode", "home_address", "go_line", "go_stop")
         if tuple(old[k] for k in watched) != tuple(self.settings[k] for k in watched):
             self._glance_force = True
@@ -475,6 +478,7 @@ class App:
             return
         self._loaded = True
         self._brand_icon()
+        self._set_pinned(self.settings["pinned"])
         threading.Thread(target=self._dispatch, daemon=True).start()
         threading.Thread(target=self._glance, daemon=True).start()
         self.worker = threading.Thread(target=self._session, daemon=False)
@@ -577,7 +581,8 @@ class App:
             return
         try:
             from PIL import Image
-            ico = Path(os.environ.get("TEMP") or ".") / "CopilotAssistant.ico"
+            # A versioned filename prevents Windows from reusing the previous logo's cached icon.
+            ico = Path(os.environ.get("TEMP") or ".") / "CopilotAssistant-v3.ico"
             if not ico.exists() or ico.stat().st_mtime < LOGO.stat().st_mtime:
                 Image.open(LOGO).save(ico, format="ICO", sizes=[(16, 16), (32, 32), (48, 48), (256, 256)])
         except OSError:
@@ -591,6 +596,13 @@ class App:
         if small:
             user32.SendMessageW(hwnd, 0x80, 0, small)
             self._icon_small = small
+
+    def _set_pinned(self, pinned):
+        """Keep the main window above other apps without activating it."""
+        hwnd = self._hwnd()
+        if hwnd:
+            insert_after = ctypes.c_void_p(-1 if pinned else -2)  # HWND_TOPMOST / HWND_NOTOPMOST
+            ctypes.windll.user32.SetWindowPos(hwnd, insert_after, 0, 0, 0, 0, 0x0013)
 
     def _hwnd(self):
         return ctypes.windll.user32.FindWindowW(None, APP_NAME)
