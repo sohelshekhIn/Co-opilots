@@ -52,11 +52,12 @@ kbd{font:12px var(--mono);color:var(--muted);border:1px solid var(--rule);border
 /* header */
 header{display:flex;align-items:center;gap:8px;padding:12px var(--gutter);border-bottom:1px solid var(--rule);box-shadow:inset 0 2px 0 var(--accent)}
 header h1{display:flex;align-items:center;gap:8px;font:600 15px var(--display);letter-spacing:-.01em;margin-right:6px}
-header h1 img{width:22px;height:22px}
+header h1 img{width:36px;height:36px;object-fit:contain}
 .state{display:flex;align-items:center;gap:7px;min-width:0;font-size:12.5px;color:var(--muted)}
 .state span{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .state i{width:7px;height:7px;background:var(--muted);flex:none}
 .icon{width:30px;padding:0;justify-content:center}
+.icon[aria-pressed=true]{color:var(--acc-ink);background:var(--acc-soft);border-color:var(--acc-line)}
 .state[data-s=ready] i{background:var(--accent)}
 .state[data-s=working] i,.state[data-s=error] i{background:var(--red)}
 .state[data-s=working] i{animation:beat 1.2s var(--ease) infinite}
@@ -161,7 +162,9 @@ main{flex:1;overflow-y:auto;padding:8px 0 16px;scroll-behavior:smooth}
   font:15px/1.45 var(--sans);min-height:44px;max-height:160px;caret-color:var(--accent)}
 .composer textarea::placeholder{color:var(--muted)}
 .crow{display:flex;align-items:center;gap:10px;margin-top:6px}
+.work-switches{display:flex;align-items:center;gap:14px;flex-wrap:wrap}
 .switch{display:flex;align-items:center;gap:8px;font-size:13px;color:var(--muted);cursor:pointer;user-select:none}
+.switch:has(input:disabled){cursor:default;opacity:.5}
 .switch input{appearance:none;width:30px;height:16px;border:1px solid var(--muted);border-radius:8px;position:relative;cursor:pointer;margin:0;transition:background .15s,border-color .15s}
 .switch input::after{content:"";position:absolute;left:2px;top:2px;width:10px;height:10px;border-radius:50%;background:var(--muted);transition:transform .2s var(--ease),background .15s}
 .switch input:checked{background:var(--accent);border-color:var(--accent)}
@@ -209,8 +212,10 @@ select,.set input[type=text],.set input:not([type]){font:13px var(--sans);color:
 </head>
 <body>
 <header>
-  <h1><img src="public/copilot-logo.png" alt="" width="22" height="22">Copilot Assistant</h1>
+  <h1><img src="public/assistant-logo-2.png?v=3" alt="" width="36" height="36">Copilot Assistant</h1>
   <p class="state" id="state" data-s="busy" role="status"><i></i><span id="stateText">Starting</span></p>
+  <button class="btn icon" id="pinBtn" type="button" aria-label="Pin Copilot Assistant on screen" title="Pin on screen" aria-pressed="false">
+    <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" aria-hidden="true"><path d="M5.5 2.5h5M6.5 2.5v3L4.5 8v1h7V8l-2-2.5v-3M8 9v4.5"/></svg></button>
   <button class="btn icon" id="setBtn" type="button" aria-label="Settings" title="Settings (Ctrl+,)" aria-expanded="false" aria-controls="settings">
     <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" aria-hidden="true"><path d="M2 4.5h7M12 4.5h2M2 11.5h2M7 11.5h7"/><circle cx="10.5" cy="4.5" r="1.6"/><circle cx="5.5" cy="11.5" r="1.6"/></svg></button>
   <button class="btn" id="newBtn" type="button" disabled>
@@ -281,6 +286,8 @@ select,.set input[type=text],.set input:not([type]){font:13px var(--sans);color:
     <div class="set"><h3>While working</h3><div>
       <div class="opt-row"><p><label for="sHide">Hide this window</label><small>Minimise Copilot Assistant while it uses your mouse and keyboard.</small></p>
         <label class="switch"><input type="checkbox" role="switch" id="sHide" name="hide"></label></div>
+      <div class="opt-row"><p><label for="sPinned">Pin on screen</label><small>Keep Copilot Assistant visible when you use another app.</small></p>
+        <label class="switch"><input type="checkbox" role="switch" id="sPinned" name="pinned"></label></div>
       <div class="opt-row"><p><label for="sNotify">Notify when an answer is ready</label><small>A Windows notification when this window is not in front.</small></p>
         <label class="switch"><input type="checkbox" role="switch" id="sNotify" name="notify"></label></div>
     </div></div>
@@ -323,7 +330,10 @@ select,.set input[type=text],.set input:not([type]){font:13px var(--sans);color:
   <label class="sr" for="input">Message Copilot Assistant</label>
   <textarea id="input" rows="2" placeholder="Getting ready…" disabled></textarea>
   <div class="crow">
-    <label class="switch"><input type="checkbox" role="switch" id="hide" checked> Hide while working</label>
+    <div class="work-switches">
+      <label class="switch"><input type="checkbox" role="switch" id="hide" checked> Hide while working</label>
+      <label class="switch"><input type="checkbox" role="switch" id="pin"> Pin on screen</label>
+    </div>
     <button class="btn primary" id="sendBtn" type="submit" disabled>Send</button>
   </div>
 </form>
@@ -549,6 +559,12 @@ function applySettings(s) {
   root.dataset.text = s.text;
   root.style.setProperty("--accent", s.accent);
   $("hide").checked = $("sHide").checked = s.hide;
+  $("pin").checked = s.pinned;
+  $("hide").disabled = $("sHide").disabled = s.pinned;
+  $("sPinned").checked = s.pinned;
+  $("pinBtn").setAttribute("aria-pressed", String(s.pinned));
+  $("pinBtn").setAttribute("aria-label", s.pinned ? "Unpin Copilot Assistant from screen" : "Pin Copilot Assistant on screen");
+  $("pinBtn").title = s.pinned ? "Unpin from screen" : "Pin on screen";
   $("sNotify").checked = s.notify;
   $("sGlance").value = s.glance; $("sSugg").checked = s.suggestions;
   $("start").classList.toggle("off", !s.suggestions);
@@ -561,10 +577,11 @@ function saveSettings(patch) {
   if (!settings) return;
   const f = $("setForm");
   const next = Object.assign({}, settings, {
-    theme: f.theme.value, text: f.text.value, hide: $("sHide").checked, notify: $("sNotify").checked, glance: $("sGlance").value,
+    theme: f.theme.value, text: f.text.value, hide: $("sHide").checked, pinned: $("sPinned").checked, notify: $("sNotify").checked, glance: $("sGlance").value,
     accent: f.accent.value || settings.accent, suggestions: $("sSugg").checked, workday_end: +$("sEnd").value, refresh: +$("sRefresh").value,
     home_mode: $("sHome").value, home_address: $("sAddress").value, go_line: $("sLine").value, go_stop: $("sStop").value
   }, patch);
+  if (next.pinned) next.hide = false;
   applySettings(next);
   api("save_settings", next).then(s => { applySettings(s); $("saved").textContent = "Saved"; setTimeout(() => $("saved").textContent = "", 1500); });
 }
@@ -577,6 +594,8 @@ function showSettings(open) {
 $("setForm").addEventListener("change", () => { homeFields(); saveSettings(); });
 $("glanceBar").addEventListener("click", () => { expanded = !expanded; layoutGlance(); });
 $("hide").addEventListener("change", e => saveSettings({ hide: e.target.checked }));
+$("pin").addEventListener("change", e => saveSettings({ pinned: e.target.checked, hide: e.target.checked ? false : settings.hide }));
+$("pinBtn").addEventListener("click", () => settings && saveSettings({ pinned: !settings.pinned }));
 $("setBtn").addEventListener("click", () => showSettings());
 $("setDone").addEventListener("click", () => showSettings(false));
 $("openLog").addEventListener("click", () => toggleLog(true));
