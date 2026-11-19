@@ -232,21 +232,21 @@ class Overlay:
         for l, t, r, b, _primary in screens:
             l, t, r, b = l - vx, t - vy, r - vx, b - vy
             canvas.create_rectangle(l + 2, t + 2, r - 2, b - 2, outline=self.ACCENT, width=3)
-            pill_w, pill_h, top = min(620, r - l - 40), 60, t + 28
+            pill_w, pill_h, top = min(700, r - l - 40), 104, t + 28
             left = l + (r - l - pill_w) // 2
             canvas.create_rectangle(left, top, left + pill_w, top + pill_h, fill="#111111", outline="#2b2b2b")
-            canvas.create_rectangle(left + 20, top + 26, left + 27, top + 33, fill=self.ACCENT, outline="")
-            canvas.create_text(left + 42, top + 20, anchor="w", fill="#ececec",
+            canvas.create_rectangle(left + 20, top + 50, left + 27, top + 57, fill=self.ACCENT, outline="")
+            canvas.create_text(left + 42, top + 25, anchor="w", fill="#ececec",
                                text=f"{APP_NAME} is using your computer", font=("Segoe UI Semibold", 12))
-            canvas.create_text(left + 42, top + 41, anchor="w", fill="#a0a0a0",
-                               text="Select Stop at any time to take back control.",
-                               font=("Segoe UI", 9))
+            canvas.create_text(left + 42, top + 47, anchor="nw", fill="#a0a0a0",
+                               text="Please avoid using the keyboard and mouse.\nPress Esc or select Stop to end the task",
+                               font=("Segoe UI", 9), width=max(180, pill_w - 184))
             # Separate small window: the overlay itself must stay click-through.
             stop = tk.Toplevel(root, bg=self.ACCENT)
             stop.withdraw()
             stop.overrideredirect(True)
             stop.attributes("-topmost", True)
-            stop.geometry(f"88x34+{left + pill_w - 104 + vx}+{top + 13 + vy}")
+            stop.geometry(f"96x38+{left + pill_w - 112 + vx}+{top + 33 + vy}")
             label = tk.Label(stop, text="■  Stop", bg=self.ACCENT, fg="#160303", activebackground="#e0352b",
                              font=("Segoe UI Semibold", 10), cursor="hand2")
             label.pack(fill="both", expand=True)
@@ -257,6 +257,7 @@ class Overlay:
             self.stops.append((stop, label))
         self._shown = False
         self._fade = 1.0
+        self._stopping = False
 
     def _layer(self, geometry, alpha, bg):
         layer = tk.Toplevel(self.root, bg=bg)
@@ -280,6 +281,9 @@ class Overlay:
         user32.SetWindowDisplayAffinity(ctypes.c_void_p(hwnd), 0x11)
 
     def _stop_clicked(self):
+        if self._stopping:
+            return
+        self._stopping = True
         for _stop, label in self.stops:
             label.configure(text="Stopping…")
         self.on_stop()
@@ -288,6 +292,7 @@ class Overlay:
         if self._shown:
             return
         self._shown = True
+        self._stopping = False
         for layer in (self.tint, self.chrome):
             layer.deiconify()
             layer.update_idletasks()
@@ -549,6 +554,8 @@ class App:
         return True
 
     def on_stop(self):
+        # Return control immediately; the worker can finish cancelling after the overlay is gone.
+        self.overlay.hide()
         self.stop.set()
         self.messages.put(("status", "Stopping"))
 
