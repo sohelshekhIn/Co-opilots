@@ -284,7 +284,7 @@ def load_calendar(days, chat=None):
         if web:
             data = web
         else:
-            return [], "Classic Outlook isn't running, and Outlook on the web didn't answer, so I couldn't see your calendar."
+            return [], "Classic Outlook isn't running, and new Outlook (on the web) didn't answer, so I couldn't see your calendar."
     if data.get("error") == "outlook":
         return [], "Classic Outlook isn't running, so I couldn't see your calendar."
     if data.get("error"):
@@ -470,18 +470,10 @@ def _meetings(items):
 
 
 def _web(chat, days):
-    page = chat.side_page()
+    import account  # account imports this module
     try:
-        if "outlook.office" not in (getattr(page, "url", "") or ""):
-            page.goto("https://outlook.office.com/calendar/", wait_until="domcontentloaded", timeout=20_000)
-            deadline = time.time() + 15
-            while time.time() < deadline and "outlook.office" not in (page.url or ""):
-                if "login" in (page.url or ""):
-                    return None
-                time.sleep(0.4)
-        if "outlook.office" not in (page.url or ""):
-            return None
-        data = page.evaluate(_WEB, days)
+        page = account.web_page(chat)
+        data = page and page.evaluate(_WEB, days)
     except Exception:
         return None
     return data if isinstance(data, dict) and not data.get("error") else None

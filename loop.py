@@ -15,6 +15,7 @@ import meetings
 import copilot_chat
 import desktop
 import files
+import insideops
 import protocol
 import safety
 import sysinfo
@@ -243,6 +244,17 @@ def _drive(task, chat, log, status, stop, instructed, facts, answer, tools):
         answer(go)
         status("Done")
         return False
+    if insideops.wants(task):
+        log("InsideOPS (background browser, no screen)")
+        try:
+            text = insideops.answer(task, chat, log, status)
+        except copilot_chat.Stopped:
+            raise
+        except Exception as exc:
+            text = f"I couldn't read InsideOPS just now. {exc}"
+        answer(text)
+        status("Done")
+        return False
     found = account.match(task, tools.memory.last_account, prior)
     if found:
         log(f"Account {found['op']} (not asking Copilot)")
@@ -260,7 +272,6 @@ def _drive(task, chat, log, status, stop, instructed, facts, answer, tools):
     want_shot = False    # set by look, or after mouse/keyboard actions
     hands_on = False
     tried = False        # any tool ran in this task; a refusal before that gets one nudge
-    mouse_actions = 0
     keyboard_navigation = 0
     last_mouse_target = None
     keyboard_window = None
@@ -288,9 +299,10 @@ def _drive(task, chat, log, status, stop, instructed, facts, answer, tools):
                 known += f"\nRecent Co-opilot tasks (oldest first; inspect history for more):\n{past}\n" if past else ""
             transcript = meetings.for_question(task, tools.memory.last_account)
             mode = ("\nFor desktop tasks, try Tab, Shift+Tab, arrows, and Enter before mouse coordinates. "
-                    "After each Tab, use focus_info. After at most three mouse actions, ask the user to do the one "
-                    "visible step, then look again.\n")
-            text = f"{head}{known}\n{tools.memory.block()}{transcript}{mode}Task:\n{task}\n{seen}"
+                    "After each Tab, use focus_info. If a click doesn't work, try another control or the keyboard. "
+                    "Do every step yourself; use ask only for a decision, never to hand a step to the user.\n")
+            now = time.strftime("%A, %Y-%m-%d %H:%M")
+            text = f"{head}{known}\n{tools.memory.block()}{transcript}{mode}Now: {now}\nTask:\n{task}\n{seen}"
         else:
             report["screen"] = seen
             report["task"] = task[:300]
@@ -392,16 +404,9 @@ def _drive(task, chat, log, status, stop, instructed, facts, answer, tools):
             if action["action"] in _NEEDS_COORDS and shot is not None:
                 target = desktop._screen_xy(action["x"], action["y"], shot)
                 if last_mouse_target and abs(target[0] - last_mouse_target[0]) < 24 and abs(target[1] - last_mouse_target[1]) < 24:
-                    report.update(ok=False, error="That click was already tried. Use the keyboard, or ask which control to use.")
+                    report.update(ok=False, error="That click was already tried. Try another control or the keyboard; do the step yourself.")
                     log("Blocked a repeated mouse target")
                     break
-            if action["action"] in _NEEDS_COORDS and mouse_actions >= 3:
-                report.update(ok=False, error=(
-                    "Mouse action limit reached. If the control is focused, press Enter or Space, then look. "
-                    "Otherwise use ask and name the visible control."
-                ))
-                log("Mouse limit reached")
-                break
             verdict = safety.review(action, desktop.foreground_title())
             if verdict[0] == "block":
                 report.update(ok=False, error=f"Blocked by the safety check, not run: {verdict[1]}")
@@ -420,7 +425,6 @@ def _drive(task, chat, log, status, stop, instructed, facts, answer, tools):
                 if action["action"] == "key" and action["key"] in ("tab", "shift+tab", "enter", "space", "up", "down", "left", "right"):
                     keyboard_navigation += 1
                 if action["action"] in _NEEDS_COORDS and shot is not None:
-                    mouse_actions += 1
                     last_mouse_target = desktop._screen_xy(action["x"], action["y"], shot)
                 if not hands_on:
                     hands_on = True

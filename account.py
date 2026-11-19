@@ -1,8 +1,8 @@
 """Read this user's work account without touching the screen.
 
-Outlook (the running classic app) answers calendar, mail, people, and tasks.
-If it isn't running, calendar and mail fall back to Outlook on the web in the
-signed-in browser. OneDrive files and the work email address are local.
+Classic Outlook (COM) answers calendar, mail, people, and tasks. New Outlook, or no
+classic Outlook running, uses Outlook on the web in the signed-in browser instead.
+event creates calendar items the same way. OneDrive files and the work email address are local.
 """
 
 import json
@@ -16,7 +16,7 @@ from urllib.parse import urlparse
 import meetings
 import sysinfo
 
-OPS = ("next", "agenda", "mail", "person", "tasks", "files", "me", "recordings")
+OPS = ("next", "agenda", "mail", "person", "tasks", "files", "me", "recordings", "event")
 _DO = re.compile(
     r"\b(open|join|click|send|reply|forward|accept|decline|delete|book|create|cancel|reschedule|"
     r"share|mute|launch|draft|compose)\b",
@@ -372,6 +372,12 @@ def run(action, chat=None):
         return present(action, _load(_files_raw()))
     if op == "me" and action.get("focus") == "email":
         return present(action, {"email": _upn()})
+    if op == "event":
+        return event(action, chat)
+    if chat is not None and op in ("next", "agenda", "mail") and outlook_order(_running(), True)[0] == "web":
+        web = _web(chat, action)
+        if web:
+            return present(action, web)
     data = _load(_outlook(action))
     if data.get("error") == "outlook" and chat is not None and op in ("next", "agenda", "mail"):
         web = _web(chat, action)
@@ -658,32 +664,254 @@ def _upn():
 
 def _web(chat, action):
     """Outlook on the web, using the browser the user is already signed in with. None if it can't."""
-    page = chat.side_page()
     try:
-        if not _on_outlook(getattr(page, "url", "")):
-            page.goto("https://outlook.office.com/mail/", wait_until="domcontentloaded", timeout=20_000)
-            deadline = time.time() + 20
-            while time.time() < deadline and not _on_outlook(page.url):
-                if "login" in (page.url or ""):
-                    return None
-                time.sleep(0.4)
-        if not _on_outlook(page.url):
-            return None
-        data = page.evaluate(_WEB, [action["op"], action.get("when") or "today", action.get("query") or ""])
+        page = web_page(chat)
+        data = page and page.evaluate(_WEB, [action["op"], action.get("when") or "today", action.get("query") or ""])
     except Exception:
         return None
     finally:
-        try:
-            chat.front()
-        except Exception:
-            pass
+        _front(chat)
     if not isinstance(data, dict) or data.get("error"):
         return None
     return data
 
 
+def _front(chat):
+    try:
+        chat.front()
+    except Exception:
+        pass
+
+
+_OUTLOOK_HOSTS = ("outlook.office.com", "outlook.office365.com", "outlook.cloud.microsoft")
+
+
 def _on_outlook(url):
-    return "outlook.office" in (urlparse(url or "").hostname or "")
+    host = (urlparse(url or "").hostname or "").lower()
+    return any(host == h or host.endswith("." + h) for h in _OUTLOOK_HOSTS)
+
+
+# Outlook on the web (and new Outlook, which is the same service) rejects cookie-only API calls with 401.
+# Its own requests carry a bearer token; we borrow it and add it to fetch calls for /api/v2.0 on that page.
+_token = {"value": "", "at": 0.0}
+_TOKEN_LIFE = 30 * 60
+_ARM = """token => {
+  window.__coAuth = token;
+  if (window.__coArmed) return;
+  window.__coArmed = true;
+  const original = window.fetch;
+  window.fetch = (url, opts = {}) => {
+    if (String(url).includes("/api/v2.0/")) {
+      opts = {...opts, headers: {...(opts.headers || {}), Authorization: window.__coAuth}};
+    }
+    return original(url, opts);
+  };
+}"""
+
+
+def web_page(chat):
+    """Outlook on the web in the background tab, with fetch carrying Outlook's own token. None if it can't."""
+    page = chat.side_page()
+    seen = []
+
+    def grab(request):
+        auth = request.headers.get("authorization", "")
+        if auth.lower().startswith("bearer ") and _on_outlook(request.url):
+            seen.append(auth)
+
+    fresh = bool(_token["value"]) and time.time() - _token["at"] < _TOKEN_LIFE
+    page.on("request", grab)
+    try:
+        if not fresh or not _on_outlook(page.url):
+            page.goto("https://outlook.cloud.microsoft/calendar/", wait_until="domcontentloaded", timeout=30_000)
+        deadline = time.time() + 25
+        while time.time() < deadline and not seen and not (fresh and _on_outlook(page.url)):
+            page.wait_for_timeout(400)  # not time.sleep: request events only fire while Playwright waits
+    finally:
+        page.remove_listener("request", grab)
+    if seen:
+        _token.update(value=seen[-1], at=time.time())
+    if not _on_outlook(page.url) or not _token["value"]:
+        return None
+    page.evaluate(_ARM, _token["value"])
+    return page
+
+
+# Creating events: classic Outlook through COM, new Outlook through the web API, an .ics file as the last resort.
+DAYS = ("monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday")
+REPEATS = ("none", "daily", "weekdays", "weekly")
+
+_EVENT_PS = r"""
+$ErrorActionPreference = 'Stop'
+function Out-Json($obj) { ConvertTo-Json -InputObject $obj -Compress }
+try {
+  try { $o = [Runtime.InteropServices.Marshal]::GetActiveObject('Outlook.Application') }
+  catch { $o = New-Object -ComObject Outlook.Application }
+  $start = [datetime]::ParseExact('__START__', 'yyyy-MM-dd HH:mm', $null)
+  $a = $o.CreateItem(1)
+  $a.Subject = __SUBJECT__
+  $a.Start = $start
+  $a.Duration = __MINUTES__
+  $a.ReminderSet = $true
+  $a.ReminderMinutesBeforeStart = __REMINDER__
+  if (__FREE__) { $a.BusyStatus = 0 }
+  if (__TYPE__ -ge 0) {
+    $p = $a.GetRecurrencePattern()
+    $p.RecurrenceType = __TYPE__
+    if (__TYPE__ -eq 1) { $p.DayOfWeekMask = __MASK__ }
+    $p.PatternStartDate = $start.Date
+    $p.StartTime = $start
+    $p.Duration = __MINUTES__
+    if ('__UNTIL__') { $p.PatternEndDate = [datetime]::ParseExact('__UNTIL__', 'yyyy-MM-dd', $null) } else { $p.NoEndDate = $true }
+  }
+  $a.Save()
+  Out-Json @{ok=$true; subject=[string]$a.Subject; start=$a.Start.ToString('yyyy-MM-dd HH:mm')}
+} catch {
+  Out-Json @{error='failed'; detail=("" + $_.Exception.Message)}
+}
+"""
+
+_EVENT_WEB = """async body => {
+  const headers = {"Content-Type": "application/json", Accept: "application/json"};
+  const made = await fetch("/api/v2.0/me/events", {method: "POST", credentials: "include", headers, body: JSON.stringify(body)});
+  if (!made.ok) return {error: "web", detail: made.status + " " + (await made.text()).slice(0, 200)};
+  const item = await made.json();
+  const back = await fetch("/api/v2.0/me/events/" + encodeURIComponent(item.Id) + "?$select=Subject", {credentials: "include", headers});
+  return back.ok ? {ok: true, subject: (await back.json()).Subject} : {error: "verify", detail: String(back.status)};
+}"""
+
+
+def _days(action):
+    if action.get("repeat") == "weekdays":
+        return list(DAYS[:5])
+    return action.get("days") or [DAYS[datetime.strptime(action["start"], "%Y-%m-%d %H:%M").weekday()]]
+
+
+def _event_ps(action):
+    repeat = action.get("repeat", "none")
+    mask = sum(1 << ((DAYS.index(d) + 1) % 7) for d in _days(action))  # Outlook: Sunday 1, Monday 2 ... Saturday 64
+    kind = {"none": -1, "daily": 0}.get(repeat, 1)
+    return (_EVENT_PS.replace("__SUBJECT__", _ps_quote(action["subject"])).replace("__START__", action["start"])
+            .replace("__MINUTES__", str(int(action.get("minutes", 30)))).replace("__REMINDER__", str(int(action.get("reminder", 15))))
+            .replace("__FREE__", "$true" if action.get("free") else "$false").replace("__TYPE__", str(kind))
+            .replace("__MASK__", str(mask)).replace("__UNTIL__", action.get("until") or ""))
+
+
+def _event_body(action, zone):
+    start = datetime.strptime(action["start"], "%Y-%m-%d %H:%M")
+    end = start + timedelta(minutes=int(action.get("minutes", 30)))
+    body = {"Subject": action["subject"],
+            "Start": {"DateTime": start.isoformat(), "TimeZone": zone},
+            "End": {"DateTime": end.isoformat(), "TimeZone": zone},
+            "IsReminderOn": True, "ReminderMinutesBeforeStart": int(action.get("reminder", 15)),
+            "ShowAs": "Free" if action.get("free") else "Busy"}
+    repeat = action.get("repeat", "none")
+    if repeat != "none":
+        pattern = ({"Type": "Daily", "Interval": 1} if repeat == "daily" else
+                   {"Type": "Weekly", "Interval": 1, "DaysOfWeek": [d.title() for d in _days(action)], "FirstDayOfWeek": "Sunday"})
+        span = ({"Type": "EndDate", "StartDate": start.date().isoformat(), "EndDate": action["until"]} if action.get("until")
+                else {"Type": "NoEnd", "StartDate": start.date().isoformat()})
+        body["Recurrence"] = {"Pattern": pattern, "Range": span}
+    return body
+
+
+def _ics(action, stamp=None):
+    start = datetime.strptime(action["start"], "%Y-%m-%d %H:%M")
+    end = start + timedelta(minutes=int(action.get("minutes", 30)))
+    summary = re.sub(r"([,;\\])", r"\\\1", action["subject"])
+    lines = ["BEGIN:VCALENDAR", "VERSION:2.0", "PRODID:-//Copilot Assistant//EN", "BEGIN:VEVENT",
+             f"UID:{start:%Y%m%dT%H%M}-{abs(hash(action['subject']))}@copilot-assistant",
+             f"DTSTAMP:{(stamp or datetime.utcnow()):%Y%m%dT%H%M%SZ}",
+             f"DTSTART:{start:%Y%m%dT%H%M%S}", f"DTEND:{end:%Y%m%dT%H%M%S}", f"SUMMARY:{summary}"]
+    repeat = action.get("repeat", "none")
+    if repeat != "none":
+        rule = "FREQ=DAILY" if repeat == "daily" else "FREQ=WEEKLY;BYDAY=" + ",".join(d[:2].upper() for d in _days(action))
+        if action.get("until"):
+            rule += f";UNTIL={action['until'].replace('-', '')}T235959"
+        lines.append("RRULE:" + rule)
+    if action.get("free"):
+        lines.append("TRANSP:TRANSPARENT")
+    lines += ["BEGIN:VALARM", f"TRIGGER:-PT{int(action.get('reminder', 15))}M", "ACTION:DISPLAY",
+              f"DESCRIPTION:{summary}", "END:VALARM", "END:VEVENT", "END:VCALENDAR"]
+    return "\r\n".join(lines) + "\r\n"
+
+
+def _running():
+    try:
+        out = subprocess.run(["tasklist", "/fo", "csv", "/nh"], capture_output=True, text=True, timeout=10,
+                             creationflags=subprocess.CREATE_NO_WINDOW).stdout
+    except (OSError, subprocess.TimeoutExpired):
+        return set()
+    return {line.split('","')[0].strip('"').lower() for line in out.splitlines() if line}
+
+
+def _classic_installed():
+    try:
+        import winreg
+        winreg.CloseKey(winreg.OpenKey(winreg.HKEY_CLASSES_ROOT, r"Outlook.Application\CLSID"))
+        return True
+    except OSError:
+        return False
+
+
+def outlook_order(running, classic):
+    """Which Outlook to use first: the one that is open, else classic if installed and new Outlook isn't open."""
+    if "outlook.exe" in running:
+        return ["classic", "web"]
+    if "olk.exe" in running or not classic:
+        return ["web"] + (["classic"] if classic else [])
+    return ["classic", "web"]
+
+
+def _zone():
+    try:
+        return subprocess.run(["tzutil", "/g"], capture_output=True, text=True, timeout=5,
+                              creationflags=subprocess.CREATE_NO_WINDOW).stdout.strip() or "Eastern Standard Time"
+    except (OSError, subprocess.TimeoutExpired):
+        return "Eastern Standard Time"
+
+
+def event(action, chat=None):
+    """Create a calendar event or reminder in whichever Outlook works. User-facing text."""
+    order = outlook_order(_running(), _classic_installed())
+    for way in order:
+        if way == "classic":
+            data = _load(sysinfo._powershell("event", _event_ps(action)))
+        elif chat is not None:
+            try:
+                page = web_page(chat)
+                data = page.evaluate(_EVENT_WEB, _event_body(action, _zone())) if page else {"error": "web"}
+            except Exception as exc:
+                data = {"error": "web", "detail": str(exc)}
+            finally:
+                _front(chat)
+        else:
+            continue
+        if data.get("ok"):
+            where = "classic Outlook" if way == "classic" else "Outlook"
+            return f"Added **{data.get('subject') or action['subject']}** to your {where} calendar.\n{_when_text(action)}"
+    import files
+    path = files.resolve(os.path.join("%USERPROFILE%", "Documents", (re.sub(r"[^\w -]", "", action["subject"])[:60] or "Event") + ".ics"))
+    path.write_text(_ics(action), encoding="utf-8")
+    files.touched.append(path)
+    os.startfile(str(path))
+    return (f"Outlook didn't let me add **{action['subject']}** directly, so I opened it in your calendar app. "
+            f"Choose **Save** there to keep it.\n{_when_text(action)}")
+
+
+def _when_text(action):
+    start = datetime.strptime(action["start"], "%Y-%m-%d %H:%M")
+    repeat = action.get("repeat", "none")
+    if repeat == "none":
+        when = f"{start:%A, %B} {start.day} at {start:%H:%M}"
+    elif repeat == "daily":
+        when = f"Every day at {start:%H:%M}, from {start:%B} {start.day}"
+    else:
+        names = [d.title() for d in _days(action)]
+        when = f"Every {', '.join(names)} at {start:%H:%M}, from {start:%B} {start.day}"
+    if action.get("until"):
+        when += f" until {action['until']}"
+    return f"- {when}\n- Reminder {int(action.get('reminder', 15))} min before"
 
 
 def glance(now=None, end_hour=17):
@@ -815,6 +1043,27 @@ def _check():
     assert "No recent inbox mail matches **sam**." in present({"op": "mail", "query": "sam"}, {"items": [], "query": "sam"})
     assert _ps_quote("a'; Remove-Item") == "'a''; Remove-Item'"
     assert _load("noise\n{\"error\": \"outlook\"}")["error"] == "outlook"
+    fri = {"op": "event", "subject": "Fill timesheet; WIN", "start": "2026-11-20 12:00", "minutes": 15, "reminder": 10,
+           "repeat": "weekly", "days": ["friday"], "free": True}
+    ics = _ics(fri, datetime(2026, 11, 19, 19, 0))
+    assert "RRULE:FREQ=WEEKLY;BYDAY=FR\r\n" in ics and "SUMMARY:Fill timesheet\\; WIN" in ics and "TRIGGER:-PT10M" in ics
+    assert "DTSTART:20261120T120000" in ics and "DTEND:20261120T121500" in ics and "TRANSP:TRANSPARENT" in ics
+    ps = _event_ps(dict(fri, subject="Tim's sheet"))
+    assert "$a.Subject = 'Tim''s sheet'" in ps and "DayOfWeekMask = 32" in ps and "RecurrenceType = 1" in ps
+    assert "if ($true)" in ps and "if ('')" in ps
+    assert "RecurrenceType = 0" in _event_ps(dict(fri, repeat="daily")) and "(-1 -ge 0)" in _event_ps(dict(fri, repeat="none"))
+    assert "DayOfWeekMask = 62" in _event_ps(dict(fri, repeat="weekdays", days=None))
+    body = _event_body(dict(fri, until="2027-06-30"), "Eastern Standard Time")
+    assert body["Recurrence"] == {"Pattern": {"Type": "Weekly", "Interval": 1, "DaysOfWeek": ["Friday"], "FirstDayOfWeek": "Sunday"},
+                                  "Range": {"Type": "EndDate", "StartDate": "2026-11-20", "EndDate": "2027-06-30"}}
+    assert body["ShowAs"] == "Free" and body["End"]["DateTime"] == "2026-11-20T12:15:00"
+    assert "Recurrence" not in _event_body(dict(fri, repeat="none"), "UTC")
+    assert outlook_order({"outlook.exe"}, True) == ["classic", "web"]
+    assert outlook_order({"olk.exe"}, True) == ["web", "classic"]
+    assert outlook_order(set(), False) == ["web"] and outlook_order(set(), True) == ["classic", "web"]
+    assert _when_text(fri).startswith("- Every Friday at 12:00, from November 20")
+    assert _on_outlook("https://outlook.cloud.microsoft/calendar/") and _on_outlook("https://outlook.office.com/mail/")
+    assert not _on_outlook("https://login.microsoftonline.com/x") and not _on_outlook("https://evil-outlook.office.com.example/")
     print("account ok")
 
 

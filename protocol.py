@@ -5,6 +5,7 @@ parse_actions returns the valid leading actions, normalized, or None.
 """
 
 import json
+from datetime import datetime
 
 MAX_BATCH = 5
 TOPICS = ("system", "disks", "processes", "network", "services", "events", "windows", "apps",
@@ -21,6 +22,8 @@ PLAYBOOKS = """Work account (no screen, already signed in):
   then reads that meeting's Teams chat for the recording and transcript. The file is often not in their OneDrive.
   If a transcript is included later in the message, answer from that text. Do not say it was saved to the PC.
 - inspect now is this PC (the window in front and recent local files). inspect history is earlier Co-opilot tasks.
+- InsideOPS (intra.ontario.ca, the OPS intranet): the app reads it in the background and gives you the page text.
+  Answer OPS intranet facts only from that text, with its source links. Never from memory, and never by opening it on screen.
 Playbooks:
 - Speakers and mics: inspect audio (devices) and cameras (camera/mic privacy and which apps use them now).
   Keys volumemute, volumeup, volumedown, playpause. Settings: open_url ms-settings:sound, ms-settings:privacy-webcam,
@@ -28,14 +31,17 @@ Playbooks:
 - Teams: inspect teams for health. New Teams keys: ctrl+1 Activity, ctrl+2 Chat, ctrl+3 Teams, ctrl+4 Calendar,
   ctrl+5 Calls, ctrl+e search, ctrl+n new chat. In a call: ctrl+shift+m mute, ctrl+shift+o camera, ctrl+shift+k raise hand,
   ctrl+shift+h leave. Chat with someone: open_url msteams:/l/chat/0/0?users=name@example.com then focus Teams.
-- Outlook: use account to read mail and the calendar. The screen is only for sending, replying, or clicking.
+- Outlook: use account to read mail and the calendar, and account event to add meetings, reminders, and recurring events.
+  Never open Outlook on screen for a reminder or calendar item. The screen is only for sending or replying to mail.
   New email: open_url mailto:a@b.ca?subject=Hello%20there&body=Line%20one (percent-encode spaces and new lines as %0A).
   Keys: ctrl+1 Mail, ctrl+2 Calendar, ctrl+shift+m new email, ctrl+r reply, f9 send/receive, ctrl+enter send.
 - Before sending a message or email, joining, starting or leaving a call, accepting or declining a meeting, or deleting
   anything: only do it if the task explicitly asks for that. Otherwise prepare it and say it is ready for the user to send.
 """
 WINDOW_OPS = ("minimize", "maximize", "restore", "move_to_main")
-ACCOUNT_OPS = ("next", "agenda", "mail", "person", "tasks", "files", "me", "recordings")
+ACCOUNT_OPS = ("next", "agenda", "mail", "person", "tasks", "files", "me", "recordings", "event")
+EVENT_REPEATS = ("none", "daily", "weekdays", "weekly")
+EVENT_DAYS = ("monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday")
 ACCOUNT_WHEN = ("today", "tomorrow", "week")
 ACCOUNT_FOCUS = ("email", "title", "manager")
 ADO_OPS = ("get", "query", "create", "update", "comment", "import_excel")
@@ -52,8 +58,8 @@ FLOW = """How to work (be smart, not busy):
    control, press Enter or Space, then look to verify. If focus_info is unavailable, use the screenshot.
    Use focus {"title":"Settings"} before keyboard navigation in Display Settings; never press Tab into Desktop.
    When a click focuses a control but does not activate it, try Enter or Space and look before clicking elsewhere.
-   Do not repeat a click that failed to change the screen. After a few mouse attempts, use ask to guide the user
-   through the specific visible control, then look again to verify their action.
+   Do not repeat a click that failed to change the screen; try another control or the keyboard.
+   Do every step yourself. ask is only for decisions, never to hand a step to the user.
 5. After acting, verify (read it back, ado get, or look at the screenshot), then done with what changed and where.
 6. If something fails, read the error in the report, adjust, and retry a different way once before giving up.
 Safety: never delete, send, submit, purchase, uninstall, change security or system settings, or run commands unless the task
@@ -79,10 +85,15 @@ first success; if unknown, ask the user for it). ops:
   user approves a preview. Read the file first, then map every header to a field or "skip".
 Field names: title, description, acceptance_criteria, tags ("a; b"), state, assigned_to, area, iteration, priority,
 effort, story_points, or any reference name such as Custom.Team.
-Account (Outlook and OneDrive, no screen): {"action":"account","op":"next"|"agenda"|"mail"|"person"|"tasks"|"files"|"me"|"recordings"}.
+Account (Outlook and OneDrive, no screen): {"action":"account","op":"next"|"agenda"|"mail"|"person"|"tasks"|"files"|"me"|"recordings"|"event"}.
 agenda takes "when": today, tomorrow, or week. mail and person take "query". me takes "focus": email, title, or manager.
 recordings takes "days" (1 to 30, default 7) and optional "query" (a partial meeting name). It matches the calendar, then reads that meeting's Teams chat.
 This is the only way to read their meetings, mail, work files, and recordings. Wait for the result; do not guess it.
+event creates a calendar item or reminder in whichever Outlook they use (classic or new), no screen:
+{"action":"account","op":"event","subject":"Fill timesheet","start":"2026-11-20 12:00","minutes":15,"reminder":15,
+"repeat":"weekly","days":["friday"],"free":true}. start is local "YYYY-MM-DD HH:MM" (the first occurrence, from today's date);
+repeat is none, daily, weekdays, or weekly (with days); optional "until":"YYYY-MM-DD". Use free true for reminders.
+If a time is missing, ask once with a few options. The result says where it was saved; report that.
 Talking to the user: say {"text"} posts a short progress note and continues;
 ask {"question","options":["..."],"multi":false,"allow_text":true} shows a card with radio buttons (or checkboxes when multi)
 and a details box, then waits; the answer comes back in the report.
@@ -411,6 +422,8 @@ def _validate_account(obj):
         out["query"] = " ".join(obj["query"].split())
     if op == "person" and "query" not in out:
         return None
+    if op == "event":
+        return _validate_event(obj, out)
     if op == "recordings":
         if obj.get("days") is not None:
             days = _num(obj.get("days"))
@@ -447,6 +460,34 @@ def _validate_ado(obj):
             out[key] = obj[key]
     if any(key not in out for key in need):
         return None
+    return out
+
+
+def _validate_event(obj, out):
+    subject, start = obj.get("subject"), obj.get("start")
+    if not _text(subject, 120) or not _text(start, 16):
+        return None
+    try:
+        datetime.strptime(start.strip(), "%Y-%m-%d %H:%M")
+        if obj.get("until"):
+            datetime.strptime(str(obj["until"]).strip(), "%Y-%m-%d")
+    except ValueError:
+        return None
+    minutes = _num(obj.get("minutes", 30))
+    reminder = _num(obj.get("reminder", 15))
+    repeat = str(obj.get("repeat") or "none").strip().lower()
+    days = [str(d).strip().lower() for d in obj.get("days") or []] if isinstance(obj.get("days") or [], list) else None
+    if minutes is None or not 1 <= minutes <= 1440 or reminder is None or not 0 <= reminder <= 10080:
+        return None
+    if repeat not in EVENT_REPEATS or days is None or any(d not in EVENT_DAYS for d in days):
+        return None
+    out.update(subject=" ".join(subject.split()), start=start.strip(), minutes=minutes, reminder=reminder, repeat=repeat)
+    if days:
+        out["days"] = days
+    if obj.get("until"):
+        out["until"] = str(obj["until"]).strip()
+    if obj.get("free") is True:
+        out["free"] = True
     return out
 
 
@@ -513,6 +554,12 @@ def _check():
     assert parse_actions("", [("json", '{"action":"account","op":"recordings","days":7}')]) == [
         {"action": "account", "op": "recordings", "days": 7}]
     assert parse_actions("", [("json", '{"action":"account","op":"recordings","days":90}')]) is None
+    weekly = ('{"action":"account","op":"event","subject":"Fill timesheet","start":"2026-11-20 12:00",'
+              '"repeat":"weekly","days":["Friday"],"free":true}')
+    assert parse_actions("", [("json", weekly)]) == [{"action": "account", "op": "event", "subject": "Fill timesheet",
+        "start": "2026-11-20 12:00", "minutes": 30, "reminder": 15, "repeat": "weekly", "days": ["friday"], "free": True}]
+    assert parse_actions("", [("json", '{"action":"account","op":"event","subject":"X","start":"Friday noon"}')]) is None
+    assert parse_actions("", [("json", '{"action":"account","op":"event","subject":"X","start":"2026-11-20 12:00","days":["fri"]}')]) is None
     assert parse_actions("", [("json", '{"action":"write_file","path":"a.txt","content":"x","mode":"nuke"}')]) is None
     print("protocol ok")
 
