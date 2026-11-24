@@ -371,7 +371,9 @@ class CopilotChat:
         self._go_temporary()
         self.status("Selecting GPT model")
         if not self._select_model():
-            raise RuntimeError(f"Could not verify {PREFERRED_MODEL} in Microsoft Copilot")
+            # The account may not offer this model, or the menu label may have changed.
+            # Same as a new chat: keep whatever is selected and still open.
+            self.log(f"Could not verify {PREFERRED_MODEL}; keeping the current model")
         self._wait_until_ready(timeout=60)
         self._hide()
 
@@ -418,12 +420,14 @@ class CopilotChat:
         except Exception:
             pass
 
-    def send(self, text, jpeg=None, ready=None):
+    def send(self, text, jpeg=None, ready=None, images=()):
         self._check_stop()
         self._wait_until_ready()
         before = self._extract()
         if jpeg is not None:
             self._attach(jpeg)
+        for path in images:
+            self._attach_path(path)
         self._insert_text(text)
         deadline = time.time() + 20
         while not self._posted():
@@ -847,6 +851,19 @@ class CopilotChat:
             }"""
         )
 
+    def _attach_path(self, path):
+        count = self._attachment_count()
+        if not self._set_files(str(path)):
+            self.log(f"Could not attach {path}; Copilot gets the path only")
+            return
+        self._await_image_consent()
+        deadline = time.time() + 15
+        while self._attachment_count() <= count and time.time() < deadline:
+            self._check_stop()
+            time.sleep(0.2)
+        self.log(f"Attached {Path(path).name}" if self._attachment_count() > count
+                 else f"Copilot showed no attachment for {Path(path).name}; it has the path")
+
     def _attach(self, jpeg):
         handle, path = tempfile.mkstemp(suffix=".jpg")
         os.close(handle)
@@ -1045,9 +1062,11 @@ class CopilotChat:
                 time.sleep(0.5)
                 continue
             signature = (data["text"], tuple(body for _lang, body in data["codes"]))
+            # A repeated step gives the same text as the last reply; Copilot having
+            # generated and stopped is then the only sign a new reply arrived.
             grown = data["count"] > before["count"] or (
                 data["text"] and data["text"] != before["text"]
-            )
+            ) or (seen_generating and not self._generating() and bool(data["text"]))
             if ready and grown and not is_echo(data["text"], outbound):
                 quick = self._to_reply(data, images=False)
                 if ready(quick):

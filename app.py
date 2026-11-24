@@ -2,6 +2,7 @@
 
 import ctypes
 import ctypes.wintypes
+import gc
 import html
 import itertools
 import json
@@ -13,6 +14,7 @@ import threading
 import webbrowser
 import time
 import tkinter as tk
+import urllib.parse
 import winreg
 from pathlib import Path
 
@@ -44,7 +46,7 @@ CHOICES = {
     "home_mode": ("off", "drive", "train"),
     "go_line": commute.LINES,
 }
-DEFAULTS = {"theme": "system", "text": "default", "hide": True, "pinned": False, "glance": "first", "suggestions": True,
+DEFAULTS = {"theme": "system", "text": "default", "hide": True, "pinned": False, "glance": "collapse", "suggestions": True,
             "notify": False, "workday_end": 17, "refresh": 5, "accent": "#3c6e71",
             "home_mode": "off", "home_address": "", "go_line": "Kitchener", "go_stop": ""}
 
@@ -332,7 +334,8 @@ class OverlayThread:
 
     def __init__(self, on_stop):
         self.commands = queue.Queue()
-        threading.Thread(target=self._run, args=(on_stop,), daemon=True).start()
+        self._thread = threading.Thread(target=self._run, args=(on_stop,), daemon=True)
+        self._thread.start()
 
     def _run(self, on_stop):
         root = tk.Tk()
@@ -344,7 +347,7 @@ class OverlayThread:
                 while True:
                     command = self.commands.get_nowait()
                     if command is None:
-                        root.destroy()
+                        root.quit()
                         return
                     getattr(overlay, command)()
             except queue.Empty:
@@ -352,7 +355,18 @@ class OverlayThread:
             root.after(50, poll)
 
         poll()
-        root.mainloop()
+        try:
+            root.mainloop()
+        finally:
+            # ponytail: Python 3.14 leaks a Tcl interpreter collected off its creating thread (gh-83274).
+            # Destroy and collect here, before this thread ends, so the UI thread's shutdown cannot.
+            try:
+                root.destroy()
+            except tk.TclError:
+                pass
+            overlay.root = None
+            del overlay, root
+            gc.collect()
 
     def show(self):
         self.commands.put("show")
@@ -362,6 +376,7 @@ class OverlayThread:
 
     def close(self):
         self.commands.put(None)
+        self._thread.join(timeout=2)
 
 
 class Api:
@@ -370,8 +385,12 @@ class Api:
     def __init__(self, app):
         self._app = app
 
-    def send(self, text):
-        return self._app.start(str(text))
+    def send(self, text, files=None):
+        return self._app.start(str(text), files)
+
+    def pick_files(self):
+        picked = self._app.window.create_file_dialog(webview.FileDialog.OPEN, allow_multiple=True)
+        return attach_paths(picked or [])
 
     def stop(self):
         self._app.on_stop()
@@ -423,6 +442,8 @@ class App:
         # Versioning it also avoids a stale taskbar icon cached under the old identity.
         ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("Copilot.Assistant.v3")
         self.messages = queue.Queue()
+        self._js_queue = queue.Queue()
+        threading.Thread(target=self._run_js, daemon=True).start()
         self.tasks = queue.Queue()
         self.stop = threading.Event()
         self.replies = {}
@@ -433,6 +454,7 @@ class App:
         self._glance_live = True
         self._glance_force = False
         self._hands_on = False
+        self._paint = True
         self._parked = False
         self._answered = False
         self._made = set()
@@ -450,6 +472,11 @@ class App:
         self.window.events.closing += self._on_close
 
     def run(self):
+        # WebView2 stops running page script while another app covers this window,
+        # so answers would wait until the user switches back.
+        os.environ["WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS"] = (
+            "--disable-features=CalculateNativeWinOcclusion --disable-backgrounding-occluded-windows "
+            "--disable-renderer-backgrounding --disable-background-timer-throttling")
         webview.start()
 
     @property
@@ -476,7 +503,34 @@ class App:
         return self.settings
 
     def _js(self, fn, *args):
-        self.window.run_js(f"ui.{fn}({', '.join(json.dumps(a) for a in args)})")
+        # run_js on a minimised WebView2 does not return until the window is shown again.
+        # Its own thread keeps the order and lets _dispatch go on to restore the window.
+        self._js_queue.put((fn, f"ui.{fn}({', '.join(json.dumps(a) for a in args)})"))
+
+    def _run_js(self):
+        while True:
+            fn, script = self._js_queue.get()
+            # A script sent while another app covers this window does not return until a click.
+            # Hold it here, where focus can still run, instead of inside that call.
+            while self.busy and not self._paint:
+                time.sleep(0.05)
+            # #region agent log
+            _t = time.time()
+            # #endregion
+            try:
+                self.window.run_js(script)
+            except Exception as exc:
+                print(f"UI update failed ({fn}): {exc}")
+            # #region agent log
+            _ms = round((time.time() - _t) * 1000)
+            if _ms > 300 or fn in ("answer", "idle", "took"):
+                desktop.dbg("P", "app.py:_run_js", "run_js", fn=fn, ms=_ms, focused=self._focused())
+            # #endregion
+
+    def _on_drop(self, event):
+        dropped = (event.get("dataTransfer") or {}).get("files") or []
+        paths = attach_paths([f.get("pywebviewFullPath") for f in dropped])
+        self._js("dropped", paths, len(dropped) - len(paths))
 
     def _on_loaded(self):
         if self._loaded:
@@ -484,6 +538,11 @@ class App:
         self._loaded = True
         self._brand_icon()
         self._set_pinned(self.settings["pinned"])
+        try:
+            from webview.dom import DOMEventHandler
+            self.window.dom.document.events.drop += DOMEventHandler(self._on_drop, True, True)
+        except Exception as exc:
+            self._dev_log(f"Drag and drop unavailable: {exc}")
         threading.Thread(target=self._dispatch, daemon=True).start()
         threading.Thread(target=self._glance, daemon=True).start()
         self.worker = threading.Thread(target=self._session, daemon=False)
@@ -502,6 +561,7 @@ class App:
                 say=lambda text: self.messages.put(("say", str(text))),
                 ask=lambda payload, reply: self.messages.put(("ask", (payload, reply))),
                 hands_on=lambda: self.messages.put(("hands_on", None)),
+                reveal=lambda: self.messages.put(("reveal", None)),
                 on_end=lambda: self.messages.put(("end", None)),
                 on_files=lambda paths: self.messages.put(("files", paths)),
             )
@@ -542,15 +602,16 @@ class App:
 
     # ---- page calls ----
 
-    def start(self, task):
+    def start(self, task, files=None):
         task = task.strip()
         if not task or self.busy:
             return False
+        paths = attach_paths(files or [])
         self.busy, self._answered, self._last_error, self._hands_on = True, False, "", False
         self._last_answer = ""
         self._started_at = time.time()
-        self._dev_log(f"▶ {task}")
-        self.tasks.put(task)
+        self._dev_log(f"▶ {task}" + (f"  [attached: {', '.join(paths)}]" if paths else ""))
+        self.tasks.put((task, paths) if paths else task)
         return True
 
     def on_stop(self):
@@ -611,8 +672,43 @@ class App:
             insert_after = ctypes.c_void_p(-1 if pinned else -2)  # HWND_TOPMOST / HWND_NOTOPMOST
             ctypes.windll.user32.SetWindowPos(hwnd, insert_after, 0, 0, 0, 0, 0x0013)
 
+    def _show_without_focus(self):
+        """Raise above other windows without taking focus, so an app that is still opening keeps it."""
+        hwnd = self._hwnd()
+        if hwnd:
+            user32 = ctypes.windll.user32
+            user32.SetWindowPos(hwnd, ctypes.c_void_p(-1), 0, 0, 0, 0, 0x0013)  # HWND_TOPMOST, no move/size/activate
+            if not self.settings["pinned"]:
+                user32.SetWindowPos(hwnd, ctypes.c_void_p(-2), 0, 0, 0, 0, 0x0013)
+
     def _hwnd(self):
         return ctypes.windll.user32.FindWindowW(None, APP_NAME)
+
+    def _focus(self):
+        """Bring this window forward when a task ends, so the result is the window in front."""
+        hwnd = self._hwnd()
+        if not hwnd:
+            return
+        user32 = ctypes.windll.user32
+        if user32.IsIconic(hwnd):
+            user32.ShowWindow(hwnd, 9)
+        # Windows only lets a process take the foreground right after a key press.
+        user32.keybd_event(0x12, 0, 0, 0)
+        user32.keybd_event(0x12, 0, 2, 0)
+        user32.SetForegroundWindow(hwnd)
+        # The first script after the window was covered does not finish until the page
+        # receives a real click. This one lands in the header padding, then the cursor goes back.
+        before, point = ctypes.wintypes.POINT(), ctypes.wintypes.POINT(8, 8)
+        user32.GetCursorPos(ctypes.byref(before))
+        user32.ClientToScreen(hwnd, ctypes.byref(point))
+        user32.SetCursorPos(point.x, point.y)
+        user32.mouse_event(2, 0, 0, 0, 0)
+        user32.mouse_event(4, 0, 0, 0, 0)
+        user32.SetCursorPos(before.x, before.y)
+        self._paint = True
+        # #region agent log
+        desktop.dbg("P", "app.py:_focus", "clicked", fg=desktop.foreground_title(), x=point.x, y=point.y)
+        # #endregion
 
     def _park(self):
         """Minimise while working, remembering the size the user chose."""
@@ -656,7 +752,11 @@ class App:
             self._js("status", message)
             if message.startswith("Sign in"):
                 self._bring_back()
+        elif kind == "reveal":
+            self._bring_back()
+            self._show_without_focus()
         elif kind == "hands_on":
+            self._paint = False
             self._hands_on = True
             self._js("step", "Using the mouse and keyboard")
             self.overlay.show()
@@ -696,6 +796,7 @@ class App:
             away = not self._focused()
             self._bring_back()
             if self.busy:
+                self._focus()
                 self._finish_task(away)
             for reply in self.replies.values():
                 reply.put(None)
@@ -730,6 +831,53 @@ class App:
         self.overlay.close()
 
 
+MAX_ATTACH = 8
+
+
+def attach_paths(items):
+    """Existing files from the picker or a drop (plain paths or file:/// links), no duplicates, at most MAX_ATTACH."""
+    out = []
+    for item in items:
+        if not isinstance(item, str) or not item.strip():
+            continue
+        raw = item.strip()
+        if raw.lower().startswith("file:"):
+            raw = urllib.parse.unquote(re.sub(r"^file:/+", "", raw, flags=re.I)).replace("/", "\\")
+        path = os.path.normpath(raw)
+        if os.path.isfile(path) and path not in out:
+            out.append(path)
+        if len(out) == MAX_ATTACH:
+            break
+    return out
+
+
+def _check_tk_thread():
+    """A Tk made off the main thread must be destroyed there, or Python 3.14 warns on the next gc."""
+    import warnings
+
+    def run():
+        root = tk.Tk()
+        root.withdraw()
+        root.after(0, root.quit)
+        root.mainloop()
+        try:
+            root.destroy()
+        except tk.TclError:
+            pass
+        del root
+        gc.collect()
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always", RuntimeWarning)
+        worker = threading.Thread(target=run)
+        worker.start()
+        worker.join(timeout=5)
+        assert not worker.is_alive()
+        gc.collect()
+    leaked = [w for w in caught if "Tcl interpreter" in str(w.message)]
+    assert not leaked, leaked
+
+
 def _check():
     runs = markdown_runs("## Top\n- **msedge** uses `940 MB`\nplain")
     assert runs[0] == ("Top", ("h",)), runs
@@ -754,6 +902,18 @@ def _check():
     linked = markdown_html("The next train is 3:34 PM.\nSource: [GO Transit](https://www.gotransit.com/en).")
     assert 'href="https://www.gotransit.com/en"' in linked and ">GO Transit</a>" in linked, linked
     assert _plain("**3:34** from [GO Transit](https://www.gotransit.com).") == "3:34 from GO Transit."
+    import tempfile
+    with tempfile.TemporaryDirectory() as folder:
+        spaced = Path(folder) / "My file.png"
+        spaced.write_bytes(b"x")
+        many = [Path(folder) / f"f{i}.txt" for i in range(9)]
+        for p in many:
+            p.write_text("x")
+        uri = "file:///" + str(spaced).replace("\\", "/").replace(" ", "%20")
+        assert attach_paths([uri]) == [str(spaced)], attach_paths([uri])
+        assert attach_paths([str(Path(folder) / "gone.png"), None, "", str(spaced), str(spaced)]) == [str(spaced)]
+        assert attach_paths([str(p) for p in many]) == [str(p) for p in many[:8]]
+    _check_tk_thread()
     print("app ok")
 
 

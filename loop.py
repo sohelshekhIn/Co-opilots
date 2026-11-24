@@ -146,12 +146,13 @@ class Tools:
 
 
 def session(tasks, log, status, stop, on_ready, on_idle, mirror=None, mirror_wanted=None, answer=None,
-            say=None, ask=None, hands_on=None, on_end=None, on_files=None):
+            say=None, ask=None, hands_on=None, on_end=None, on_files=None, reveal=None):
     """Open the chat once, then run tasks from the queue until it yields None."""
     facts = {}
     threading.Thread(target=lambda: facts.setdefault("system", sysinfo.collect("system")), daemon=True).start()
     chat = copilot_chat.CopilotChat(status, log, stop, mirror, mirror_wanted)
     tools = Tools(chat, log, stop, say, ask, hands_on)
+    tools.reveal = reveal or (lambda: None)
     try:
         status("Preparing chat")
         chat.open()
@@ -182,6 +183,7 @@ def session(tasks, log, status, stop, on_ready, on_idle, mirror=None, mirror_wan
                     log(f"New chat: {exc}")
                 status("Ready")
                 continue
+            task, attached = task if isinstance(task, tuple) else (task, [])
             stop.clear()
             files.touched.clear()
             tools.allowed.clear()
@@ -194,9 +196,9 @@ def session(tasks, log, status, stop, on_ready, on_idle, mirror=None, mirror_wan
                 (answer or log)(text)
 
             try:
-                if _local_open(task, log, status, answered):
+                if not attached and _local_open(task, log, status, answered):
                     pass
-                elif _drive(task, chat, log, status, stop, instructed, facts, answered, tools) is not False:
+                elif _drive(task, chat, log, status, stop, instructed, facts, answered, tools, attached) is not False:
                     instructed = True
             except Skipped:
                 log("Skipped")
@@ -233,10 +235,31 @@ def session(tasks, log, status, stop, on_ready, on_idle, mirror=None, mirror_wan
         chat.close()
 
 
-def _drive(task, chat, log, status, stop, instructed, facts, answer, tools):
+def _attached_text(paths):
+    if not paths:
+        return "", []
+    images = [p for p in paths if p.lower().endswith(IMAGE_TYPES)][:MAX_IMAGES]
+    lines = "\n".join(f"- {p}{' (image, attached to this message)' if p in images else ''}" for p in paths)
+    return (f"\nAttached files (on this PC; read them with read_file or open them with open_path; "
+            f"never ask the user to paste them):\n{lines}\n"), images
+
+
+IMAGE_TYPES = (".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp")
+MAX_IMAGES = 4
+
+
+def _check_attached():
+    text, images = _attached_text([r"C:\a\b.PNG", r"C:\a\notes.txt"] + [rf"C:\a\{i}.jpg" for i in range(5)])
+    assert images == [r"C:\a\b.PNG"] + [rf"C:\a\{i}.jpg" for i in range(3)], images
+    assert r"C:\a\notes.txt" in text and "read_file" in text
+    assert _attached_text([]) == ("", [])
+
+
+def _drive(task, chat, log, status, stop, instructed, facts, answer, tools, attached=()):
     prior = tools.memory.turns[-1][1] if tools.memory.turns and tools.memory.turns[-1][0] == "assistant" else ""
+    listed, images = _attached_text(list(attached))
     try:
-        go = commute.ask(task)
+        go = None if attached else commute.ask(task)
     except Exception as exc:
         go = f"I couldn't read the GO timetable just now. {exc}"
     if go:
@@ -244,7 +267,7 @@ def _drive(task, chat, log, status, stop, instructed, facts, answer, tools):
         answer(go)
         status("Done")
         return False
-    if insideops.wants(task):
+    if not attached and insideops.wants(task):
         log("InsideOPS (background browser, no screen)")
         try:
             text = insideops.answer(task, chat, log, status)
@@ -255,7 +278,7 @@ def _drive(task, chat, log, status, stop, instructed, facts, answer, tools):
         answer(text)
         status("Done")
         return False
-    found = account.match(task, tools.memory.last_account, prior)
+    found = None if attached else account.match(task, tools.memory.last_account, prior)
     if found:
         log(f"Account {found['op']} (not asking Copilot)")
         status("Reading your account")
@@ -277,15 +300,16 @@ def _drive(task, chat, log, status, stop, instructed, facts, answer, tools):
     keyboard_window = None
     display_target = re.search(r"monitor\s*(\d+)", task, re.I)
     display_focus = None
+    shot_title = ""
     for round_no in range(1, MAX_ROUNDS + 1):
         if stop.is_set():
             raise copilot_chat.Stopped()
         status(f"Step {round_no}")
         jpeg = None
         if want_shot:
-            shot = desktop.screenshot()
+            shot = desktop.screenshot(desktop.screens_for(task, shot_title))
             jpeg = shot.jpeg
-            seen = f"Screenshot attached: {shot.sent_w} x {shot.sent_h} pixels. Monitors: {shot.layout()}."
+            seen = desktop.shot_caption(shot)
         else:
             seen = "No screenshot attached (use look if you need to see the screen)."
         want_shot = False
@@ -302,14 +326,14 @@ def _drive(task, chat, log, status, stop, instructed, facts, answer, tools):
                     "After each Tab, use focus_info. If a click doesn't work, try another control or the keyboard. "
                     "Do every step yourself; use ask only for a decision, never to hand a step to the user.\n")
             now = time.strftime("%A, %Y-%m-%d %H:%M")
-            text = f"{head}{known}\n{tools.memory.block()}{transcript}{mode}Now: {now}\nTask:\n{task}\n{seen}"
+            text = f"{head}{known}\n{tools.memory.block()}{transcript}{mode}Now: {now}\nTask:\n{task}\n{listed}{seen}"
         else:
             report["screen"] = seen
             report["task"] = task[:300]
             report["reply_with"] = "only the fenced json actions for the next step of the task; do not describe the screenshot"
             text = _fit(report)
         log(f"Step {round_no}: sending{' with screenshot' if jpeg else ''}")
-        reply = chat.send(text, jpeg, ready=_complete)
+        reply = chat.send(text, jpeg, ready=_complete, images=images if round_no == 1 else ())
         _log_reply(log, reply)
         actions = protocol.parse_actions(reply.text, reply.code_blocks)
         if actions is None:
@@ -452,9 +476,25 @@ def _drive(task, chat, log, status, stop, instructed, facts, answer, tools):
                         if keyboard_window.lower() not in desktop.foreground_title().lower():
                             desktop.focus_window(keyboard_window)
                             log(f"Focused {keyboard_window} before the key")
-                    output = desktop.run(action, shot)
+                    slow = []
+
+                    def on_slow(name):
+                        slow.append(name)
+                        status(f"{name} is opening. This is taking a little longer.")
+                        log(f"{name} is slow to open; showing the assistant while it loads")
+                        tools.reveal()
+
+                    output = desktop.run(action, shot, on_slow)
+                    if slow:
+                        status(f"Step {round_no}")
+                        tools.hands_on()  # the app is in front now: hide the assistant again before the next step
                     if action["action"] == "open_url" and str(action.get("url", "")).startswith("ms-settings:"):
                         keyboard_window = "Settings"
+                        shot_title = "Settings"
+                    elif action["action"] == "focus":
+                        shot_title = action["title"]
+                    elif action["action"] == "open_app":
+                        shot_title = action["name"]
                     if output is not None:
                         report["results"].append({"topic": action["action"], "output": output})
                     time.sleep(_SETTLE)
@@ -590,4 +630,5 @@ def _log_reply(log, reply):
 
 
 if __name__ == "__main__":
+    _check_attached()
     _check()

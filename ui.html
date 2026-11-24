@@ -73,21 +73,40 @@ header h1 img{width:36px;height:36px;object-fit:contain}
 header .state{margin-right:auto}
 
 /* glance */
-.glance{border-bottom:1px solid var(--rule)}
-.glance-bar{display:flex;align-items:center;justify-content:space-between;width:100%;padding:8px var(--gutter);font-size:13px;text-align:left}
-.glance-bar svg{transition:transform .2s var(--ease)}
+.glance{position:relative;border-bottom:1px solid var(--rule);container-type:inline-size}
+.glance-bar{display:flex;align-items:center;gap:8px;width:100%;padding:8px var(--gutter);font-size:13px;text-align:left;background:var(--bg)}
+.glance-bar span{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.glance-bar svg{transition:transform .2s var(--ease);flex:none}
 .glance.collapsed .glance-bar svg{transform:rotate(-90deg)}
-.glance-grid{display:grid;grid-template-columns:1.45fr 1fr 1fr;padding:0 calc(var(--gutter) - 18px)}
+.glance:not(.collapsed) .glance-bar{position:absolute;z-index:1;top:0;right:var(--gutter);bottom:0;width:28px;padding:0;justify-content:center;background:transparent}
+.glance:not(.collapsed) .glance-bar span{display:none}
+.glance-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));padding:0 var(--gutter)}
+.glance-grid:has(.home:not([hidden])){grid-template-columns:repeat(4,minmax(0,1fr))}
+.glance:not(.collapsed) .glance-grid{padding-right:calc(var(--gutter) + 28px)}
 .glance.collapsed .glance-grid{display:none}
-.cell{display:block;text-align:left;padding:12px 18px 11px;min-width:0;transition:background .15s}
+.cell{display:block;text-align:left;padding:8px 12px 7px;min-width:0;transition:background .15s}
 .cell+.cell{border-left:1px solid var(--rule)}
-.cell.home{grid-column:1 / -1;border-left:0;border-top:1px solid var(--rule)}
 .cell:hover{background:var(--acc-soft)}
-.cell .k{font-size:12px;color:var(--acc-ink);font-weight:600}
-.cell .v{display:block;font:600 30px/1.1 var(--display);letter-spacing:-.02em;margin:6px 0 4px;white-space:nowrap}
+.cell .k{display:block;font-size:12px;color:var(--acc-ink);font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.cell .v{display:block;font:600 22px/1.1 var(--display);letter-spacing:-.02em;margin:2px 0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .cell .v.soon{color:var(--red)}
 .cell .v.dim{color:var(--muted);font-weight:400}
 .cell .s{display:block;font-size:12.5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+@container (min-width:900px){
+  .cell{padding:10px 16px 9px}
+  .cell .v{font-size:26px}
+}
+@container (max-width:480px){
+  .glance-grid,.glance-grid:has(.home:not([hidden])){grid-template-columns:repeat(2,minmax(0,1fr))}
+  .glance-grid .cell{border-left:0}
+  .glance-grid .cell:nth-child(even){border-left:1px solid var(--rule)}
+  .glance-grid .cell:nth-child(n+3){border-top:1px solid var(--rule)}
+}
+@media (max-height:760px){
+  .cell{padding:6px 10px 5px}
+  .cell .v{font-size:18px}
+  .cell .k,.cell .s{font-size:11.5px}
+}
 
 /* main */
 main{flex:1;overflow-y:auto;padding:8px 0 16px;scroll-behavior:smooth}
@@ -161,15 +180,26 @@ main{flex:1;overflow-y:auto;padding:8px 0 16px;scroll-behavior:smooth}
 .composer textarea{display:block;width:100%;border:0;outline:0;resize:none;background:transparent;color:var(--ink);
   font:15px/1.45 var(--sans);min-height:44px;max-height:160px;caret-color:var(--accent)}
 .composer textarea::placeholder{color:var(--muted)}
-.crow{display:flex;align-items:center;gap:10px;margin-top:6px}
-.work-switches{display:flex;align-items:center;gap:14px;flex-wrap:wrap}
+.composer.drop{border-color:var(--accent);border-style:dashed;background:var(--acc-soft)}
+.chips{list-style:none;display:flex;flex-wrap:wrap;gap:6px;margin:6px 0 2px}
+.chip{display:flex;align-items:center;gap:6px;max-width:15rem;height:28px;padding:0 4px 0 6px;border:1px solid var(--acc-line);
+  border-radius:4px;background:var(--acc-soft);font-size:12.5px;color:var(--ink)}
+.chip img{width:20px;height:20px;object-fit:cover;border-radius:2px;flex:none}
+.chip .ext{font-size:9.5px;padding:1px 4px}
+.chip span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.chip button{border:0;background:none;color:var(--muted);cursor:pointer;width:20px;height:20px;padding:0;font-size:14px;line-height:1;flex:none}
+.chip button:hover{color:var(--ink)}
+.chip.bad{border-color:var(--red);background:none;color:var(--muted)}
+.attached{display:flex;flex-wrap:wrap;gap:6px;margin-top:6px}
+.attached span{font:12px var(--mono);color:var(--muted);border:1px solid var(--rule);border-radius:3px;padding:1px 6px}
+.crow{display:flex;align-items:center;gap:8px;margin-top:8px}
 .switch{display:flex;align-items:center;gap:8px;font-size:13px;color:var(--muted);cursor:pointer;user-select:none}
 .switch:has(input:disabled){cursor:default;opacity:.5}
 .switch input{appearance:none;width:30px;height:16px;border:1px solid var(--muted);border-radius:8px;position:relative;cursor:pointer;margin:0;transition:background .15s,border-color .15s}
 .switch input::after{content:"";position:absolute;left:2px;top:2px;width:10px;height:10px;border-radius:50%;background:var(--muted);transition:transform .2s var(--ease),background .15s}
 .switch input:checked{background:var(--accent);border-color:var(--accent)}
 .switch input:checked::after{transform:translateX(14px);background:#fff}
-.crow .btn{margin-left:auto}
+.crow .primary{margin-left:auto}
 .bar{display:flex;gap:16px;padding:9px var(--gutter) 11px;font-size:12px;color:var(--muted);flex-wrap:wrap}
 .bar kbd{margin-right:5px}
 
@@ -226,8 +256,8 @@ select,.set input[type=text],.set input:not([type]){font:13px var(--sans);color:
     Stop</button>
 </header>
 
-<section class="glance" id="glance" aria-label="Today at a glance">
-  <button class="glance-bar" id="glanceBar" type="button" hidden aria-expanded="true" aria-controls="glanceGrid">
+<section class="glance collapsed" id="glance" aria-label="Today at a glance">
+  <button class="glance-bar" id="glanceBar" type="button" aria-expanded="false" aria-controls="glanceGrid">
     <span id="glanceSum">Today</span>
     <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><path d="M4 6l4 4 4-4"/></svg></button>
   <div class="glance-grid" id="glanceGrid">
@@ -329,11 +359,10 @@ select,.set input[type=text],.set input:not([type]){font:13px var(--sans);color:
 <form class="composer" id="composer">
   <label class="sr" for="input">Message Copilot Assistant</label>
   <textarea id="input" rows="2" placeholder="Getting ready…" disabled></textarea>
+  <ul class="chips" id="chips" aria-label="Attached files" hidden></ul>
   <div class="crow">
-    <div class="work-switches">
-      <label class="switch"><input type="checkbox" role="switch" id="hide" checked> Hide while working</label>
-      <label class="switch"><input type="checkbox" role="switch" id="pin"> Pin on screen</label>
-    </div>
+    <button class="btn icon" id="attachBtn" type="button" aria-label="Attach files" title="Attach files, or drop them here" disabled>
+      <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" aria-hidden="true"><path d="M10.5 4.5 5.3 9.7a1.6 1.6 0 0 0 2.3 2.3l5.4-5.4a3 3 0 0 0-4.2-4.2L3.4 7.8a4.3 4.3 0 0 0 6.1 6.1l3.5-3.5"/></svg></button>
     <button class="btn primary" id="sendBtn" type="submit" disabled>Send</button>
   </div>
 </form>
@@ -352,6 +381,7 @@ const ICON = {
   now: '<svg class="spin" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><path d="M8 2a6 6 0 1 1-6 6"/></svg>'
 };
 let ready = false, busy = false, turn = null, steps = null;
+let attached = [];  // {path, name}, sent with the next message
 
 const api = (name, ...args) => window.pywebview && window.pywebview.api[name](...args);
 const el = (tag, cls, text) => { const n = document.createElement(tag); if (cls) n.className = cls; if (text != null) n.textContent = text; return n; };
@@ -381,7 +411,8 @@ function setComposer() {
   const can = ready && !busy;
   input.disabled = !can;
   input.placeholder = busy ? "Copilot Assistant is working. Press Esc to stop." : ready ? "Ask, or tell me what to do on this PC" : "Getting ready…";
-  $("sendBtn").disabled = !can || !input.value.trim();
+  $("sendBtn").disabled = !can || (!input.value.trim() && !attached.length);
+  $("attachBtn").disabled = !can;
   $("newBtn").disabled = !can;
   $("stopBtn").hidden = !busy; $("newBtn").hidden = busy;
   document.querySelectorAll(".task,.cell").forEach(b => b.disabled = !can);
@@ -389,18 +420,66 @@ function setComposer() {
 
 function send(text) {
   text = (text || "").trim();
-  if (!text || !ready || busy) return;
+  const files = attached.map(f => f.path);
+  if ((!text && !files.length) || !ready || busy) return;
+  if (!text) text = "Look at the attached files.";
   if (!$("settings").hidden) showSettings(false);
-  busy = true; input.value = ""; fit(); setComposer();
+  busy = true; input.value = ""; fit();
+  attached = []; drawChips(); setComposer();
   $("start").hidden = true;
   chatted = true; layoutGlance();
-  const you = el("div"); you.append(body("", "you")); you.firstChild.textContent = text;
+  const you = el("div"); you.append(body("", "you")); you.firstChild.querySelector(".msg").textContent = text;
+  if (files.length) {
+    const names = el("div", "attached");
+    files.forEach(p => names.append(el("span", null, baseName(p))));
+    you.firstChild.querySelector(".msg").append(names);
+  }
   row("You", you);
   turn = el("div"); steps = el("ul", "steps"); turn.append(steps);
   row("Copilot Assistant", turn);
   step("Working on it");
-  api("send", text);
+  api("send", text, files);
 }
+
+// ---- attachments ----
+const IMAGE = /\.(png|jpe?g|gif|webp|bmp)$/i;
+const baseName = p => p.split(/[\\/]/).pop();
+function addFiles(paths) {
+  for (const p of paths) {
+    if (p && !attached.some(f => f.path === p) && attached.length < 8) attached.push({ path: p, name: baseName(p) });
+  }
+  drawChips(); setComposer();
+}
+function drawChips(note) {
+  const box = $("chips"); box.replaceChildren();
+  attached.forEach((f, i) => {
+    const c = el("li", "chip");
+    if (IMAGE.test(f.path)) { const img = el("img"); img.alt = ""; img.src = "file:///" + f.path.replace(/\\/g, "/"); c.append(img); }
+    else c.append(el("i", "ext", (f.name.split(".").pop() || "file").slice(0, 4).toUpperCase()));
+    const x = el("button", null, "×"); x.type = "button"; x.setAttribute("aria-label", "Remove " + f.name);
+    x.addEventListener("click", () => { attached.splice(i, 1); drawChips(); setComposer(); input.focus(); });
+    c.append(el("span", null, f.name), x); c.title = f.path; box.append(c);
+  });
+  if (note) { const c = el("li", "chip bad"); c.append(el("span", null, note)); box.append(c); }
+  box.hidden = !box.children.length;
+}
+function dropPaths(dt) {
+  const uris = (dt.getData("text/uri-list") || "").split(/\r?\n/).filter(u => /^file:/i.test(u));
+  return uris.map(u => decodeURIComponent(u.replace(/^file:\/+/i, "")).replace(/\//g, "\\"));
+}
+$("attachBtn").addEventListener("click", () => api("pick_files").then(p => p && addFiles(p)));
+["dragenter", "dragover"].forEach(t => document.addEventListener(t, e => {
+  if (!e.dataTransfer || ![...e.dataTransfer.types].includes("Files")) return;
+  e.preventDefault(); e.dataTransfer.dropEffect = ready && !busy ? "copy" : "none";
+  $("composer").classList.add("drop");
+}));
+document.addEventListener("dragleave", e => { if (!e.relatedTarget) $("composer").classList.remove("drop"); });
+// Full paths arrive from Python (pywebview reads them from the drop); uri-list covers drags from a browser.
+document.addEventListener("drop", e => {
+  if (!e.dataTransfer || ![...e.dataTransfer.types].includes("Files")) return;
+  e.preventDefault(); $("composer").classList.remove("drop");
+  if (ready && !busy) { addFiles(dropPaths(e.dataTransfer)); input.focus(); }
+});
 
 function step(label) {
   if (!steps) return;
@@ -467,6 +546,11 @@ window.ui = {
     (turn || row("Copilot Assistant", el("div"))).append(box); scroll();
   },
   took(seconds) { turn && turn.append(el("p", "took", seconds + " s")); },
+  dropped(paths, missing) {
+    if (!ready || busy) return;
+    addFiles(paths);
+    if (missing > 0) drawChips(`${missing} file${missing > 1 ? "s" : ""} had no path. Use Attach for ${missing > 1 ? "those" : "that one"}.`);
+  },
   closed() { ready = false; busy = false; setComposer(); input.placeholder = "Copilot Assistant has stopped. Close and reopen it."; },
   log(line, isError) {
     const pre = $("logText"), s = el("span", isError ? "e" : null, line + "\n");
@@ -493,9 +577,7 @@ window.ui = {
       home.querySelector(".v").className = "v" + (g.home.value === "–" || g.home.value === "None" ? " dim" : "");
       home.querySelector(".s").textContent = g.home.detail;
     } else home.hidden = true;
-    const bits = [$("gNext").querySelector(".v").textContent, $("gMail").querySelector(".v").textContent + " unread", $("gFree").querySelector(".v").textContent + " free"];
-    if (g.home) bits.push(g.home.k + " " + g.home.value);
-    $("glanceSum").textContent = bits.join("  ·  ");
+    $("glanceSum").textContent = glanceLine(g);
   }
 };
 
@@ -535,17 +617,32 @@ input.addEventListener("input", () => { fit(); setComposer(); });
 input.addEventListener("keydown", e => { if (e.key === "Enter" && !e.shiftKey && !e.isComposing) { e.preventDefault(); send(input.value); } });
 document.querySelectorAll("#start .task").forEach(b => b.addEventListener("click", () => send(b.querySelector("span").textContent)));
 document.querySelectorAll(".cell").forEach(b => b.addEventListener("click", () => b.dataset.ask === "settings" ? showSettings(true) : send(b.dataset.ask)));
-let settings = null, chatted = false, expanded = true;
+let settings = null, chatted = false, expanded = false;
 for (let h = 14; h < 22; h++) $("sEnd").append(new Option(`${h}:00`, h));
 ["Lakeshore West","Lakeshore East","Kitchener","Milton","Barrie","Richmond Hill","Stouffville"].forEach(n => $("sLine").append(new Option(n, n)));
 function layoutGlance() {
   const mode = settings ? settings.glance : "first";
   const gone = mode === "off" || (mode === "first" && chatted);
   $("glance").hidden = gone;
-  $("glance").classList.toggle("collapsed", mode === "collapse" && !expanded);
+  const folded = mode === "collapse" && !expanded;
+  $("glance").classList.toggle("collapsed", folded);
   $("glanceBar").hidden = mode !== "collapse";
-  $("glanceBar").setAttribute("aria-expanded", String(!(mode === "collapse" && !expanded)));
-  api("set_glance_live", !gone && !(mode === "collapse" && !expanded));
+  $("glanceBar").setAttribute("aria-expanded", String(!folded));
+  if (mode === "collapse" && !folded) $("glanceBar").setAttribute("aria-label", "Collapse today");
+  else $("glanceBar").removeAttribute("aria-label");
+  api("set_glance_live", !gone);
+}
+
+function glanceLine(g) {
+  if (!g.outlook) return "Open Outlook to see your day";
+  const n = g.next, f = g.free || { minutes: 0 }, m = f.minutes;
+  const dur = m >= 60 ? `${Math.floor(m / 60)}h ${String(m % 60).padStart(2, "0")}m` : `${m}m`;
+  const free = f.gap ? (f.now ? `${dur} free until ${f.gap.split(" to ")[1]}` : `${dur} free, next gap ${f.gap}`) : (m ? `${dur} free` : "Workday is over");
+  const parts = [n ? `${n.subject}, ${n.time} (${n.when})` : "No meeting in the next 14 days"];
+  parts.push(g.mail ? (g.mail.unread ? `${g.mail.unread} unread, latest ${g.mail.from}` : "Inbox is clear") : "Couldn't read mail");
+  parts.push(free);
+  if (g.home) parts.push(g.home.value === "–" || g.home.value === "None" ? `${g.home.k}: ${g.home.detail}` : `${g.home.k} ${g.home.value}`);
+  return parts.join("  ·  ");
 }
 function homeFields() {
   const mode = $("sHome").value;
@@ -558,9 +655,8 @@ function applySettings(s) {
   s.theme === "system" ? delete root.dataset.theme : root.dataset.theme = s.theme;
   root.dataset.text = s.text;
   root.style.setProperty("--accent", s.accent);
-  $("hide").checked = $("sHide").checked = s.hide;
-  $("pin").checked = s.pinned;
-  $("hide").disabled = $("sHide").disabled = s.pinned;
+  $("sHide").checked = s.hide;
+  $("sHide").disabled = s.pinned;
   $("sPinned").checked = s.pinned;
   $("pinBtn").setAttribute("aria-pressed", String(s.pinned));
   $("pinBtn").setAttribute("aria-label", s.pinned ? "Unpin Copilot Assistant from screen" : "Pin Copilot Assistant on screen");
@@ -593,8 +689,6 @@ function showSettings(open) {
 }
 $("setForm").addEventListener("change", () => { homeFields(); saveSettings(); });
 $("glanceBar").addEventListener("click", () => { expanded = !expanded; layoutGlance(); });
-$("hide").addEventListener("change", e => saveSettings({ hide: e.target.checked }));
-$("pin").addEventListener("change", e => saveSettings({ pinned: e.target.checked, hide: e.target.checked ? false : settings.hide }));
 $("pinBtn").addEventListener("click", () => settings && saveSettings({ pinned: !settings.pinned }));
 $("setBtn").addEventListener("click", () => showSettings());
 $("setDone").addEventListener("click", () => showSettings(false));
