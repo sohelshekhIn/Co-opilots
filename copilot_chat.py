@@ -420,7 +420,7 @@ class CopilotChat:
         except Exception:
             pass
 
-    def send(self, text, jpeg=None, ready=None, images=()):
+    def send(self, text, jpeg=None, ready=None, images=(), on_text=None):
         self._check_stop()
         self._wait_until_ready()
         before = self._extract()
@@ -440,7 +440,7 @@ class CopilotChat:
                 time.sleep(0.25)
                 if self._posted():
                     break
-        return self._wait_reply(before, text, ready)
+        return self._wait_reply(before, text, ready, on_text)
 
     def _posted(self):
         """An empty composer means the message went out."""
@@ -1042,12 +1042,13 @@ class CopilotChat:
                 blank = item
         return blank
 
-    def _wait_reply(self, before, outbound, ready=None):
+    def _wait_reply(self, before, outbound, ready=None, on_text=None):
         deadline = time.time() + _REPLY_TIMEOUT
         started = time.time()
         seen_generating = False
         last_sig = None
         stable = 0
+        shown = ""
         while time.time() < deadline:
             self._check_stop()
             try:
@@ -1061,6 +1062,9 @@ class CopilotChat:
             except Exception:
                 time.sleep(0.5)
                 continue
+            if on_text and data["text"] and not is_echo(data["text"], outbound) and len(data["text"]) >= len(shown) + 24:
+                shown = data["text"]
+                on_text(shown)
             signature = (data["text"], tuple(body for _lang, body in data["codes"]))
             # A repeated step gives the same text as the last reply; Copilot having
             # generated and stopped is then the only sign a new reply arrived.

@@ -527,6 +527,17 @@ def open_url(url):
     _wait_foreground_change(previous, 6)
 
 
+def file_url_path(url):
+    """Local path from a file:// link. UNC shares stay //server/share."""
+    parts = urllib.parse.urlparse(url)
+    path = urllib.parse.unquote(parts.path)
+    if parts.netloc and parts.netloc.lower() not in ("", "localhost"):
+        return "//" + parts.netloc + path
+    if len(path) >= 3 and path[0] == "/" and path[2] == ":":
+        path = path[1:]
+    return path
+
+
 def open_path(path):
     target = Path(os.path.expandvars(os.path.expanduser(path.strip())))
     if not target.exists():
@@ -815,6 +826,8 @@ def _check():
     assert not url_ok("javascript:alert(1)")
     assert url_ok("mailto:a@b.ca?subject=Hi%20there") and url_ok("ms-settings:sound") and not url_ok("mailto:a@b.ca?subject=Hi there")
     assert url_ok("msteams:/l/chat/0/0?users=a@b.ca") and url_ok("ms-settings:") and not url_ok("shell:startup")
+    assert file_url_path("file:///C:/Users/me/Plan%20v2.docx") == "C:/Users/me/Plan v2.docx"
+    assert file_url_path("file://server/share/a.docx") == "//server/share/a.docx"
     assert _searchish("searchhost.exe", "") and _searchish("notepad.exe", "Search")
     assert not _searchish("notepad.exe", "Untitled - Notepad")
     assert own_console(r"C:\Windows\System32\cmd.exe - py app.py", 0)

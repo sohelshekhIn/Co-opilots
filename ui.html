@@ -122,17 +122,21 @@ main{flex:1;overflow-y:auto;padding:8px 0 16px;scroll-behavior:smooth}
 
 .turn{animation:rise .5s var(--ease) both}
 @keyframes rise{from{opacity:0;transform:translateY(6px)}}
-.body{position:relative;margin:2px 0 8px;padding:10px 12px;min-width:0;overflow-wrap:anywhere;user-select:text;
+.body{position:relative;margin:2px 0 8px;padding:10px 14px 12px;min-width:0;overflow-wrap:break-word;user-select:text;
   background:var(--card);border:1px solid color-mix(in srgb,var(--ink) 24%,transparent);border-radius:6px}
 .body .msg p:last-child{margin-bottom:0}
-.body a{color:var(--acc-ink);text-underline-offset:3px}
+.body a{color:var(--acc-ink);text-underline-offset:3px;text-decoration-thickness:1px}
+#linktip{position:fixed;z-index:30;max-width:min(520px,calc(100vw - 16px));padding:6px 8px;
+  background:var(--ink);color:var(--bg);font:12px/1.35 var(--mono);overflow-wrap:anywhere;
+  border-radius:4px;pointer-events:none}
 .copy{position:absolute;top:6px;right:6px;font-size:12px;color:var(--muted);background:var(--bg);
   border:1px solid var(--rule);border-radius:4px;padding:2px 8px;opacity:0}
 .body:hover .copy,.copy:focus-visible{opacity:1}
-.body p{margin:0 0 6px;max-width:68ch}
-.body p.h{font:600 15px var(--display);margin:12px 0 4px}
-.body p.li{padding-left:16px;position:relative}
-.body p.li::before{content:"";position:absolute;left:3px;top:.68em;width:5px;height:5px;background:var(--accent)}
+.body p{margin:0 0 6px;max-width:66ch}
+.body p.h{font:600 14px/1.35 var(--display);margin:14px 0 2px;padding-top:12px;border-top:1px solid var(--rule)}
+.body p.h:first-of-type{margin-top:10px}
+.body p.li{padding-left:14px;position:relative;margin-bottom:2px}
+.body p.li::before{content:"";position:absolute;left:2px;top:.68em;width:4px;height:4px;border-radius:50%;background:var(--accent)}
 .body p.ol{padding-left:16px}
 .body code{font:12.5px var(--mono);background:var(--code);padding:1px 5px;border-radius:3px}
 .body strong{font-weight:600}
@@ -380,7 +384,7 @@ const ICON = {
   done: '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><path d="M3 8.5l3 3 7-7"/></svg>',
   now: '<svg class="spin" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><path d="M8 2a6 6 0 1 1-6 6"/></svg>'
 };
-let ready = false, busy = false, turn = null, steps = null;
+let ready = false, busy = false, turn = null, steps = null, draft = null;
 let attached = [];  // {path, name}, sent with the next message
 
 const api = (name, ...args) => window.pywebview && window.pywebview.api[name](...args);
@@ -497,7 +501,17 @@ function settle() {
   if (last && last.dataset.label === "Working on it" && steps.children.length === 1) last.remove();
   else if (last) { last.classList.remove("now"); last.querySelector("i").innerHTML = ICON.done; }
 }
-function reply(html, cls) { settle(); (turn || row("Copilot Assistant", el("div"))).append(body(html, cls)); scroll(); }
+function reply(html, cls) {
+  settle();
+  if (draft) { draft.remove(); draft = null; }
+  (turn || row("Copilot Assistant", el("div"))).append(body(html, cls)); scroll();
+}
+function stream(html) {
+  if (!turn) turn = row("Copilot Assistant", el("div"));
+  if (!draft) { settle(); draft = body(html); turn.append(draft); }
+  else draft.querySelector(".msg").innerHTML = html;
+  scroll();
+}
 
 function fit() { input.style.height = "auto"; input.style.height = Math.min(input.scrollHeight, 160) + "px"; }
 
@@ -512,13 +526,14 @@ window.ui = {
   step,
   say(html) { settle(); turn && turn.append(body(html)); step("Working on it"); },
   answer(html) { reply(html); },
+  stream,
   note(html) { reply(html, "note"); },
   error(html) { reply(html, "err"); },
   end() { settle(); },
   ask(id, p) { settle(); askCard(id, p); },
   idle() {
     settle();
-    ready = true; busy = false; turn = steps = null;
+    ready = true; busy = false; draft = null; turn = steps = null;
     const s = STATE($("stateText").textContent);
     $("state").dataset.s = s;
     if (s === "ready") $("stateText").textContent = "Ready";
@@ -694,6 +709,16 @@ $("setBtn").addEventListener("click", () => showSettings());
 $("setDone").addEventListener("click", () => showSettings(false));
 $("openLog").addEventListener("click", () => toggleLog(true));
 window.addEventListener("pywebviewready", () => api("get_settings").then(applySettings));
+// #region agent log
+window.addEventListener("pywebviewready", () => {
+  const st = () => ({vis: document.visibilityState, hasFocus: document.hasFocus(), t: Date.now()});
+  for (const ev of ["visibilitychange", "freeze", "resume", "focus", "blur", "pageshow", "pagehide"])
+    (ev === "visibilitychange" || ev === "freeze" || ev === "resume" ? document : window).addEventListener(ev, () => api("dbg_page", ev, st()), true);
+  let last = Date.now();
+  setInterval(() => { const now = Date.now(); if (now - last > 3000) api("dbg_page", "timer gap", {gap: now - last, ...st()}); last = now; }, 1000);
+  setInterval(() => api("dbg_page", "heartbeat", st()), 5000);
+});
+// #endregion
 $("stopBtn").addEventListener("click", () => api("stop"));
 $("newBtn").addEventListener("click", newChat);
 $("logClose").addEventListener("click", () => toggleLog(false));
@@ -708,10 +733,51 @@ function toggleLog(open) {
 }
 document.addEventListener("click", e => {
   const a = e.target.closest("a");
-  if (!a || !a.href) return;
+  if (!a) return;
+  const href = a.getAttribute("href");
+  if (!href) return;
   e.preventDefault();
-  api("open_link", a.href);
+  api("open_link", href);
 });
+const linktip = el("div");
+linktip.id = "linktip";
+linktip.hidden = true;
+linktip.setAttribute("role", "tooltip");
+document.body.append(linktip);
+let tipLink = null;
+function showLinkTip(a) {
+  const href = a && a.getAttribute("href");
+  if (!href) { hideLinkTip(); return; }
+  tipLink = a;
+  linktip.textContent = a.getAttribute("data-tip") || href;
+  linktip.hidden = false;
+  const z = parseFloat(getComputedStyle(document.body).zoom) || 1;
+  const r = a.getBoundingClientRect();
+  const pad = 8;
+  let x = r.left / z, y = (r.bottom + 6) / z;
+  const w = linktip.offsetWidth, h = linktip.offsetHeight;
+  const vw = window.innerWidth / z, vh = window.innerHeight / z;
+  if (x + w > vw - pad) x = vw - w - pad;
+  if (h > vh - pad * 2) y = pad;
+  else if (y + h > vh - pad) y = Math.max(pad, r.top / z - h - 6);
+  linktip.style.left = Math.max(pad, x) + "px";
+  linktip.style.top = Math.max(pad, y) + "px";
+}
+function hideLinkTip() { tipLink = null; linktip.hidden = true; }
+document.addEventListener("mouseover", e => {
+  const a = e.target.closest && e.target.closest("a");
+  if (a) showLinkTip(a);
+});
+document.addEventListener("mouseout", e => {
+  const a = e.target.closest && e.target.closest("a");
+  if (a && tipLink === a && !(e.relatedTarget && a.contains(e.relatedTarget))) hideLinkTip();
+});
+document.addEventListener("focusin", e => {
+  const a = e.target.closest && e.target.closest("a");
+  if (a) showLinkTip(a);
+});
+document.addEventListener("focusout", () => { if (tipLink && !tipLink.matches(":focus-within")) hideLinkTip(); });
+main.addEventListener("scroll", hideLinkTip, {passive: true});
 document.addEventListener("keydown", e => {
   const k = e.key.toLowerCase();
   if (e.key === "Escape") {

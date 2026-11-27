@@ -5,6 +5,7 @@ import queue
 import re
 import threading
 import time
+import urllib.parse
 
 import pyautogui
 
@@ -113,6 +114,7 @@ class Tools:
         self.retried = False
         self.nudged = False
         self.verified = False
+        self.open_links = []
         self.memory = Memory()
 
     def ask(self, question, options=(), multi=False, allow_text=True):
@@ -146,22 +148,44 @@ class Tools:
 
 
 def session(tasks, log, status, stop, on_ready, on_idle, mirror=None, mirror_wanted=None, answer=None,
-            say=None, ask=None, hands_on=None, on_end=None, on_files=None, reveal=None):
-    """Open the chat once, then run tasks from the queue until it yields None."""
+            say=None, ask=None, hands_on=None, on_end=None, on_files=None, reveal=None, web_ask=None, stream=None):
+    """Take questions immediately. Open the Copilot browser on the first question that needs it."""
     facts = {}
     threading.Thread(target=lambda: facts.setdefault("system", sysinfo.collect("system")), daemon=True).start()
     chat = copilot_chat.CopilotChat(status, log, stop, mirror, mirror_wanted)
     tools = Tools(chat, log, stop, say, ask, hands_on)
     tools.reveal = reveal or (lambda: None)
-    try:
+    opened = False
+
+    def ensure_chat():
+        """The Copilot browser is the slow part of startup. Open it on the first question that needs it."""
+        nonlocal opened
+        if opened:
+            return
         status("Preparing chat")
         chat.open()
+        opened = True
+
+    try:
         status("Ready")
         on_ready()
         # ponytail: one chat for every task; the instruction goes in once. New chat clears memory
         # and opens a fresh browser thread, which sends the instruction again.
         instructed = False
         while True:
+            if web_ask is not None:
+                try:
+                    box = web_ask.get_nowait()
+                except queue.Empty:
+                    box = None
+                if box is not None:
+                    try:
+                        ensure_chat()
+                        box.put(account.web_glance(chat))
+                    except Exception:
+                        box.put({})
+                    status("Ready")
+                    continue
             try:
                 task = tasks.get(timeout=0.2)
             except queue.Empty:
@@ -172,6 +196,9 @@ def session(tasks, log, status, stop, on_ready, on_idle, mirror=None, mirror_wan
             if task is RESET:
                 tools.memory.clear()
                 instructed = False
+                if not opened:
+                    status("Ready")
+                    continue
                 try:
                     status("New chat")
                     chat._new_chat()
@@ -198,7 +225,7 @@ def session(tasks, log, status, stop, on_ready, on_idle, mirror=None, mirror_wan
             try:
                 if not attached and _local_open(task, log, status, answered):
                     pass
-                elif _drive(task, chat, log, status, stop, instructed, facts, answered, tools, attached) is not False:
+                elif _drive(task, chat, log, status, stop, instructed, facts, answered, tools, attached, ensure_chat, stream) is not False:
                     instructed = True
             except Skipped:
                 log("Skipped")
@@ -255,9 +282,25 @@ def _check_attached():
     assert _attached_text([]) == ("", [])
 
 
-def _drive(task, chat, log, status, stop, instructed, facts, answer, tools, attached=()):
+def _account_needs_browser(found):
+    """Recordings and a web-only Outlook need the Copilot browser. Classic Outlook does not."""
+    op = found.get("op")
+    if op == "recordings":
+        return True
+    if op in ("next", "agenda", "mail", "tasks", "event") or (op == "me" and found.get("focus") != "email"):
+        return account.outlook_order(account._running(), True)[0] == "web"
+    return False
+
+
+def _drive(task, chat, log, status, stop, instructed, facts, answer, tools, attached=(), ensure_chat=None, stream=None):
+    tools.open_links = []
     prior = tools.memory.turns[-1][1] if tools.memory.turns and tools.memory.turns[-1][0] == "assistant" else ""
     listed, images = _attached_text(list(attached))
+
+    def need_chat():
+        if ensure_chat:
+            ensure_chat()
+
     try:
         go = None if attached else commute.ask(task)
     except Exception as exc:
@@ -267,8 +310,9 @@ def _drive(task, chat, log, status, stop, instructed, facts, answer, tools, atta
         answer(go)
         status("Done")
         return False
-    if not attached and insideops.wants(task):
+    if not attached and not _ewrs(task) and insideops.wants(task):
         log("InsideOPS (background browser, no screen)")
+        need_chat()
         try:
             text = insideops.answer(task, chat, log, status)
         except copilot_chat.Stopped:
@@ -280,16 +324,39 @@ def _drive(task, chat, log, status, stop, instructed, facts, answer, tools, atta
         return False
     found = None if attached else account.match(task, tools.memory.last_account, prior)
     if found:
+        if found.get("summarize"):
+            log("Account mail summary (asking Copilot)")
+            status("Summarising your mail")
+            need_chat()
+            try:
+                text = account.summarize(found, chat, on_text=stream)
+            except copilot_chat.Stopped:
+                raise
+            except Exception as exc:
+                text = f"I couldn't summarise that mail.\n{exc}"
+            answer(text)
+            status("Done")
+            return False
         log(f"Account {found['op']} (not asking Copilot)")
         status("Reading your account")
         tools.memory.remember(found)
+        browser = _account_needs_browser(found)
+        if browser:
+            need_chat()
         try:
-            text = account.run(found, chat)
+            text = account.run(found, chat if browser else None)
         except Exception as exc:
             text = f"I couldn't read that from your account.\n{exc}"
+        if not browser and text.startswith("Classic Outlook isn't running"):
+            need_chat()
+            try:
+                text = account.run(found, chat)
+            except Exception as exc:
+                text = f"I couldn't read that from your account.\n{exc}"
         answer(text)
         status("Done")
         return False
+    need_chat()
     report = None
     shot = None          # last screenshot Copilot saw; clicks are mapped against it
     want_shot = False    # set by look, or after mouse/keyboard actions
@@ -403,7 +470,7 @@ def _drive(task, chat, log, status, stop, instructed, facts, answer, tools, atta
                         ))
                         log("Rejected a status-only answer")
                         break
-                answer(summary)
+                answer(_with_open_links(summary, tools))
                 status("Done")
                 return
             if action["action"] == "look":
@@ -465,10 +532,16 @@ def _drive(task, chat, log, status, stop, instructed, facts, answer, tools, atta
                     output = sysinfo.collect(action["topic"])
                     report["results"].append({"topic": action["topic"], "output": output})
                     log(f"inspect {action['topic']}: {len(output)} chars")
+                elif action["action"] == "shell":
+                    output = sysinfo.diagnose(action["command"], action["shell"], action.get("admin"), stop)
+                    report["results"].append({"topic": "shell", "output": output})
+                    log(f"shell: {output.splitlines()[0][:160]}")
                 elif action["action"] in _SKILLS:
                     status(f"Step {round_no}: {action['action']}")
                     output = _skill(action, tools)
                     if output is not None:
+                        if action["action"] == "account":
+                            _keep_open_links(tools, output)
                         report["results"].append({"topic": action["action"], "output": output})
                         log(f"{action['action']}: {len(str(output))} chars")
                 else:
@@ -514,6 +587,11 @@ def _drive(task, chat, log, status, stop, instructed, facts, answer, tools, atta
 
 _SKILLS = {"list_dir", "read_file", "write_file", "ado", "say", "ask", "account"}
 _NEEDS_COORDS = {"click", "double_click", "right_click", "move", "drag", "scroll"}
+
+
+def _ewrs(task):
+    """Desk booking has a known path. Don't send it through an InsideOPS search."""
+    return bool(re.search(r"\b(ewrs|book(?:ing)? a (?:desk|workspace)|desk booking|touchdown centres?)\b", task or "", re.I))
 
 
 def _local_open(task, log, status, answer):
@@ -581,8 +659,50 @@ def _facts_text(facts, stop):
     return facts.get("system") or ""
 
 
-def _fit(report, limit=12000):
-    """Halve the longest inspect output until the report fits one chat message."""
+_MD_LINK = re.compile(r'\[([^\]]+)\]\(((?:https?://|file://|mailitem:)[^)\s]+)(?:\s+"([^"]*)")?\)')
+
+
+def _keep_open(url):
+    """Links we created to open a mail, file, or calendar item. Not every address in the message."""
+    if url.startswith(("mailitem:", "file:")):
+        return True
+    host = urllib.parse.urlparse(url).netloc.lower()
+    return host in ("outlook.office.com", "outlook.office365.com", "outlook.cloud.microsoft", "outlook.live.com")
+
+
+def _keep_open_links(tools, output):
+    seen = {url for _, url, *_ in tools.open_links}
+    for line in (output or "").splitlines():
+        cite = line.lstrip().startswith(("Recording:", "Link:"))
+        for label, url, tip in _MD_LINK.findall(line):
+            if url in seen or not (cite or _keep_open(url)):
+                continue
+            seen.add(url)
+            tools.open_links.append((label, url, tip))
+
+
+def _open_md(label, url, tip):
+    return f'- [{label}]({url} "{tip}")' if tip else f"- [{label}]({url})"
+
+
+def _with_open_links(summary, tools):
+    """Copilot rewrites the answer and drops the open link. Put it back, and keep a mail's hover text."""
+    text = summary or ""
+    for _label, url, tip in tools.open_links:
+        titled = f']({url} "{tip}")'
+        if tip and f"]({url})" in text and titled not in text:
+            text = text.replace(f"]({url})", titled)
+    extra = [_open_md(label, url, tip) for label, url, tip in tools.open_links if url not in text]
+    if not extra:
+        return text
+    return text.rstrip() + "\n\nOpen:\n" + "\n".join(extra[:8])
+
+
+def _fit(report, limit=56000):
+    """Halve the longest inspect output until the report fits one chat message.
+
+    56000 covers eight mail bodies at the 6000-character cap, plus the rest of the report.
+    """
     text = json.dumps(report)
     while len(text) > limit and report["results"]:
         longest = max(report["results"], key=lambda item: len(item["output"]))
@@ -616,6 +736,25 @@ def _check():
     assert not _REFUSE.search("Your PC cannot reach the VPN because the adapter is disabled.")
     assert _facts_text({"system": "PC"}, type("S", (), {"is_set": lambda self: False})()) == "PC"
     assert _local_open("what time is it", lambda *_: None, lambda *_: None, lambda *_: None) is False
+    assert _ewrs("book a desk for tomorrow") and not _ewrs("what's my next meeting")
+    assert _account_needs_browser({"op": "recordings"})
+    assert not _account_needs_browser({"op": "files"}) and not _account_needs_browser({"op": "tasks"})
+    held = type("T", (), {"open_links": []})()
+    _keep_open_links(held, '- **Ada**: [SCO recordings](mailitem:ABCDEF0123456789 "Mail (03-04 14:10) - Chen, Yi-Leng")\n'
+                     "Recording: [SCO Demo](https://contoso.sharepoint.com/sites/a/video/SCO.mp4)\n"
+                     "Link: [UAT](https://stage.example.com/en)\nSee [site](https://example.com).")
+    assert held.open_links == [
+        ("SCO recordings", "mailitem:ABCDEF0123456789", "Mail (03-04 14:10) - Chen, Yi-Leng"),
+        ("SCO Demo", "https://contoso.sharepoint.com/sites/a/video/SCO.mp4", ""),
+        ("UAT", "https://stage.example.com/en", "")], held.open_links
+    text = _with_open_links("I found the thread. No recording link.", held)
+    assert 'Open:\n- [SCO recordings](mailitem:ABCDEF0123456789 "Mail (03-04 14:10) - Chen, Yi-Leng")' in text, text
+    assert "[SCO Demo](https://contoso.sharepoint.com/sites/a/video/SCO.mp4)" in text
+    assert "[UAT](https://stage.example.com/en)" in text
+    assert "example.com)." not in text and "[site]" not in text
+    again = _with_open_links("Already [SCO recordings](mailitem:ABCDEF0123456789).", held)
+    assert again.count("SCO recordings") == 1 and ' "Mail (03-04 14:10) - Chen, Yi-Leng")' in again, again
+    assert "[SCO Demo]" in again and "[UAT]" in again
     print("loop ok")
 
 

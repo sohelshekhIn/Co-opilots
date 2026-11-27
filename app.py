@@ -24,7 +24,6 @@ import account
 import commute
 import desktop
 import files
-import loop
 
 APP_NAME = "Copilot Assistant"
 SIDE_W = 520
@@ -118,15 +117,25 @@ def _dark_mode():
 
 
 _INLINE = re.compile(r"(\*\*[^*]+\*\*|`[^`]+`)")
+_LINK = re.compile(r'\[[^\]]+\]\((?:https?://|file://|mailitem:)[^\s)]+(?:\s+"[^"]*")?\)')
 
 
 def markdown_runs(text):
     """Split light markdown into (text, tags) runs: ## headings, - / * / 1. bullets, **bold**, `code`."""
     runs = []
-    text = text.replace("\r", "")
+    saved = []
+
+    def hold(match):
+        saved.append(match.group(0))
+        return f"\ue000{len(saved) - 1}\ue000"
+
+    text = _LINK.sub(hold, (text or "").replace("\r", ""))
     # ponytail: Copilot sometimes inlines lists as "...: - a - b". Only " - " after : ) ' " or . starts
     # a bullet, so hyphens inside titles stay; a stray "x. - y" sentence will also split.
+    # Links are held out first so "Mail (time) - sender" inside one is not a new bullet.
     text = re.sub(r"(?<=[:)'\".])\s+-\s+(?=\S)", "\n- ", text)
+    if saved:
+        text = re.sub(r"\ue000(\d+)\ue000", lambda m: saved[int(m.group(1))], text)
     for line in text.split("\n"):
         stripped = line.strip()
         line_tags = ()
@@ -152,10 +161,15 @@ def markdown_runs(text):
 
 def _linkify(safe):
     """Turn [label](https://...) and bare http(s) addresses into links. `safe` is already escaped."""
-    def linked(label, url):
-        return f'<a href="{html.escape(url, quote=True)}">{label}</a>'
+    def linked(label, url, tip=""):
+        url = html.unescape(url)
+        tip = html.unescape(tip).strip()
+        attr = f' data-tip="{html.escape(tip, quote=True)}"' if tip else ""
+        return f'<a href="{html.escape(url, quote=True)}"{attr}>{label}</a>'
 
-    safe = re.sub(r"\[([^\]]+)\]\((https?://[^\s)]+)\)", lambda m: linked(m.group(1), m.group(2)), safe)
+    safe = re.sub(
+        r'\[([^\]]+)\]\(((?:https?://|file://|mailitem:)[^\s)]+)(?:\s+(?:"|&quot;)(.*?)(?:"|&quot;))?\)',
+        lambda m: linked(m.group(1), m.group(2), m.group(3) or ""), safe)
     parts = re.split(r"(<a href=.*?</a>)", safe)
     for i, part in enumerate(parts):
         if i % 2:
@@ -201,6 +215,7 @@ def describe(action):
         "click": "Clicking", "double_click": "Clicking", "right_click": "Clicking", "drag": "Dragging",
         "open_url": "Opening a web page", "open_path": "Opening a folder", "look": "Checking the screen",
         "inspect": f"Checking {action.get('topic', 'this PC')}", "account": "Reading your work account",
+        "shell": "Running a read-only check",
         "ado": "Working in Azure DevOps", "list_dir": "Looking through files", "read_file": "Reading a file",
         "write_file": "Saving a file", "read_clipboard": "Reading the clipboard",
     }
@@ -397,6 +412,7 @@ class Api:
 
     def new_chat(self):
         if not self._app.busy:
+            import loop
             self._app.tasks.put(loop.RESET)
 
     def reply(self, card_id, answer):
@@ -413,6 +429,11 @@ class Api:
 
     def set_glance_live(self, live):
         self._app.set_glance_live(live)
+
+    def dbg_page(self, event, data=None):
+        # #region agent log
+        desktop.dbg("V", "ui.html", str(event), page=data, focused=self._app._focused(), fg=desktop.foreground_title())
+        # #endregion
 
     def file_op(self, op, path):
         """Only files this app wrote in this session; the page can't point these at anything else."""
@@ -431,9 +452,16 @@ class Api:
         return ""
 
     def open_link(self, url):
-        url = str(url)
-        if url.startswith(("https://", "http://")):
-            webbrowser.open(url)
+        url = str(url).strip()
+        try:
+            if url.startswith(("https://", "http://")):
+                webbrowser.open(url)
+            elif url.startswith("file:"):
+                desktop.open_path(desktop.file_url_path(url))
+            elif url.startswith("mailitem:"):
+                account.open_mail(urllib.parse.unquote(url[len("mailitem:"):]))
+        except Exception as exc:
+            self._app._js("note", markdown_html(f"Couldn't open that.\n{exc}"))
 
 
 class App:
@@ -463,6 +491,7 @@ class App:
         self._status = ""
         self._started_at = 0.0
         self._loaded = False
+        self.web_ask = queue.Queue()
         self.overlay = OverlayThread(self.on_stop)
         self.window = webview.create_window(
             APP_NAME, UI.as_uri(), js_api=Api(self), width=SIDE_W, height=820, min_size=(420, 560),
@@ -510,10 +539,6 @@ class App:
     def _run_js(self):
         while True:
             fn, script = self._js_queue.get()
-            # A script sent while another app covers this window does not return until a click.
-            # Hold it here, where focus can still run, instead of inside that call.
-            while self.busy and not self._paint:
-                time.sleep(0.05)
             # #region agent log
             _t = time.time()
             # #endregion
@@ -536,6 +561,22 @@ class App:
         if self._loaded:
             return
         self._loaded = True
+        # #region agent log
+        def _flags():
+            try:
+                out = subprocess.run(["powershell", "-NoProfile", "-Command",
+                                      "Get-CimInstance Win32_Process -Filter \"Name='msedgewebview2.exe'\" | "
+                                      "Where-Object { $_.ParentProcessId -eq " + str(os.getpid()) + " } | "
+                                      "Select-Object -ExpandProperty CommandLine"],
+                                     capture_output=True, text=True, timeout=30,
+                                     creationflags=subprocess.CREATE_NO_WINDOW).stdout
+                desktop.dbg("F", "app.py:_on_loaded", "webview2 flags",
+                            env=os.environ.get("WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS"),
+                            cmd=[c[:1500] for c in out.splitlines() if c.strip()])
+            except Exception as exc:
+                desktop.dbg("F", "app.py:_on_loaded", "flags failed", error=str(exc))
+        threading.Thread(target=_flags, daemon=True).start()
+        # #endregion
         self._brand_icon()
         self._set_pinned(self.settings["pinned"])
         try:
@@ -549,6 +590,7 @@ class App:
         self.worker.start()
 
     def _session(self):
+        import loop
         try:
             loop.session(
                 self.tasks,
@@ -558,12 +600,14 @@ class App:
                 on_ready=lambda: self.messages.put(("idle", None)),
                 on_idle=lambda: self.messages.put(("idle", None)),
                 answer=lambda text: self.messages.put(("answer", str(text))),
+                stream=lambda text: self.messages.put(("stream", str(text))),
                 say=lambda text: self.messages.put(("say", str(text))),
                 ask=lambda payload, reply: self.messages.put(("ask", (payload, reply))),
                 hands_on=lambda: self.messages.put(("hands_on", None)),
                 reveal=lambda: self.messages.put(("reveal", None)),
                 on_end=lambda: self.messages.put(("end", None)),
                 on_files=lambda paths: self.messages.put(("files", paths)),
+                web_ask=self.web_ask,
             )
         finally:
             self.messages.put(("closed", None))
@@ -591,6 +635,15 @@ class App:
                 continue
             try:
                 data = account.glance(end_hour=self.settings["workday_end"])
+                if data.pop("need_web", False):
+                    box = queue.Queue(1)
+                    self.web_ask.put(box)
+                    try:
+                        extra = box.get(timeout=75)
+                    except queue.Empty:
+                        extra = None
+                    if isinstance(extra, dict):
+                        data = account.glance_fill(data, extra, end_hour=self.settings["workday_end"])
                 home = commute.card(self.settings)
                 if home:
                     data["home"] = home
@@ -777,12 +830,16 @@ class App:
             payload, reply = message
             card_id = next(self._ids)
             self.replies[card_id] = reply
+            if self.settings["notify"] and not self._focused():
+                threading.Thread(target=_toast, args=("Question: " + payload["question"],), daemon=True).start()
             self._bring_back()
             self._dev_log("Ask: " + payload["question"])
             self._js("ask", card_id, payload)
         elif kind == "end":
             self._answered = True
             self._js("end")
+        elif kind == "stream":
+            self._js("stream", markdown_html(message))
         elif kind == "answer":
             self._answered = True
             self._last_answer = message
@@ -901,6 +958,11 @@ def _check():
     assert clean_settings({"home_address": "  1 Main  St "})["home_address"] == "1 Main St"
     linked = markdown_html("The next train is 3:34 PM.\nSource: [GO Transit](https://www.gotransit.com/en).")
     assert 'href="https://www.gotransit.com/en"' in linked and ">GO Transit</a>" in linked, linked
+    opened = markdown_html('Read [Notes](mailitem:ABCDEF0123456789 "Mail (11-16 14:02) - Ada") and [Plan](file:///C:/Users/me/Plan.docx).\n'
+                           "[Mail](https://outlook.office.com/mail/id/1?a=1&b=2)")
+    assert 'href="mailitem:ABCDEF0123456789"' in opened and 'data-tip="Mail (11-16 14:02) - Ada"' in opened, opened
+    assert 'href="file:///C:/Users/me/Plan.docx"' in opened, opened
+    assert 'href="https://outlook.office.com/mail/id/1?a=1&amp;b=2"' in opened, opened
     assert _plain("**3:34** from [GO Transit](https://www.gotransit.com).") == "3:34 from GO Transit."
     import tempfile
     with tempfile.TemporaryDirectory() as folder:
