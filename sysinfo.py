@@ -3,6 +3,7 @@
 import ctypes
 import json
 import os
+import re
 import subprocess
 import time
 from pathlib import Path
@@ -240,10 +241,14 @@ def collect(topic):
 
 
 def _powershell(topic, command):
+    # ponytail: the pipe is IBM437, which turns a curly quote into ". That breaks JSON. UTF-8 for this process.
+    command = ("[Console]::OutputEncoding = New-Object System.Text.UTF8Encoding $false; "
+               "$OutputEncoding = [Console]::OutputEncoding\n" + command)
     try:
         done = subprocess.run(
             ["powershell", "-NoProfile", "-NonInteractive", "-Command", command],
-            capture_output=True, text=True, timeout=25, creationflags=subprocess.CREATE_NO_WINDOW,
+            capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=25,
+            creationflags=subprocess.CREATE_NO_WINDOW,
         )
     except subprocess.TimeoutExpired:
         return f"{topic}: timed out"
@@ -252,6 +257,188 @@ def _powershell(topic, command):
 
 def _clip(text):
     return text if len(text) <= _LIMIT else text[:_LIMIT] + "\n...(truncated)"
+
+
+# Read-only diagnostics Copilot may request. The first word of each pipeline stage has to be listed.
+# ponytail: a verb list, not a parser. A command that changes something is refused even if the user asks.
+# Upgrade path is a real PowerShell parser if the list gets in the way of a safe check.
+_PS_FIRST = {
+    "get-process", "get-service", "get-computerinfo", "get-ciminstance", "get-winevent", "get-eventlog",
+    "get-netadapter", "get-netipconfiguration", "get-netipaddress", "get-netroute", "get-nettcpconnection",
+    "get-dnsclientserveraddress", "get-dnsclientcache", "get-pnpdevice", "get-volume", "get-disk",
+    "get-physicaldisk", "get-partition", "get-hotfix", "get-itemproperty", "get-childitem", "get-item",
+    "get-mpcomputerstatus", "get-mpthreatdetection", "get-bitlockervolume", "get-windowsdriver",
+    "get-counter", "get-date", "resolve-dnsname", "test-netconnection", "test-connection",
+}
+_PS_REST = _PS_FIRST | {"measure-object", "select-object", "sort-object", "where-object", "format-table", "format-list", "out-string"}
+_CMD_FIRST = {
+    "ipconfig", "ping", "nslookup", "tracert", "pathping", "netstat", "route", "arp", "hostname", "whoami",
+    "systeminfo", "tasklist", "driverquery", "ver", "gpresult", "dsregcmd", "nltest", "klist", "powercfg",
+    "netsh", "sc", "sfc", "dism", "reg",
+}
+_CMD_REST = _CMD_FIRST | {"findstr", "find", "more"}
+_SECRET = re.compile(r"password|credential|secret|\btoken\b|\\sam\b", re.I)
+_ARGS = {
+    "powercfg": re.compile(r"^powercfg(?:\s+/(?:a|availablesleepstates|q|query|lastwake|requests|waketimers|devicequery))+$", re.I),
+    "sfc": re.compile(r"^sfc\s+/verifyonly$", re.I),
+    "dism": re.compile(r"^dism\s+/online\s+/cleanup-image\s+/(?:checkhealth|scanhealth)$", re.I),
+    "dsregcmd": re.compile(r"^dsregcmd\s+/status$", re.I),
+    "klist": re.compile(r"^klist(?:\s+tickets)?$", re.I),
+    "route": re.compile(r"^route\s+print$", re.I),
+    "arp": re.compile(r"^arp\s+-a$", re.I),
+    "sc": re.compile(r"^sc\s+(?:query|qc)(?:\s+\S+)?$", re.I),
+    "reg": re.compile(r"^reg\s+query\s+\S+(?:\s+/v\s+\S+)?$", re.I),
+    "gpresult": re.compile(r"^gpresult\s+/r(?:\s+/scope\s+(?:user|computer))?$", re.I),
+    "nltest": re.compile(r"^nltest\s+/(?:dsgetdc:\S+|sc_query:\S+)$", re.I),
+    "netsh": re.compile(r"^netsh(?:\s+\S+)*\s+show(?:\s+\S+)*$", re.I),
+}
+
+
+def command_ok(shell, command):
+    """The command if it is one read-only check, else None."""
+    command = " ".join(str(command or "").split())
+    shell = str(shell or "").strip().lower()
+    if shell not in ("powershell", "cmd") or not command or len(command) > 300 or _SECRET.search(command):
+        return None
+    if re.search(r"[;&`$<>{}\r\n]", command):
+        return None
+    parts = [part.strip() for part in command.split("|")]
+    if not parts or any(not part for part in parts):
+        return None
+    first = _PS_FIRST if shell == "powershell" else _CMD_FIRST
+    rest = _PS_REST if shell == "powershell" else _CMD_REST
+    for index, part in enumerate(parts):
+        word = part.split()[0].lower()
+        if word not in (first if index == 0 else rest):
+            return None
+        if word == "ping" and re.search(r"(^|\s)-t(\s|$)", part, re.I):
+            return None
+        rule = _ARGS.get(word)
+        if rule and not rule.search(part):
+            return None
+        if word == "netsh" and re.search(r"\b(set|add|delete|reset)\b", part, re.I):
+            return None
+    return command
+
+
+def diagnose(command, shell, admin, stop):
+    """Run one allowed check. Stop kills it. admin raises the Windows approval prompt and still cannot change anything."""
+    command = command_ok(shell, command)
+    if not command:
+        return "Refused. That is not a read-only diagnostic, so it was not run."
+    if stop is not None and stop.is_set():
+        return "Stopped."
+    shell = str(shell).lower()
+    if admin:
+        return _diagnose_admin(command, shell, stop)
+    argv = (["powershell", "-NoProfile", "-NonInteractive", "-Command", command] if shell == "powershell"
+            else ["cmd", "/d", "/c", command])
+    proc = subprocess.Popen(argv, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+                            creationflags=subprocess.CREATE_NO_WINDOW)
+    note = _wait(proc, stop, 20)
+    if note:
+        return note
+    out, _err = proc.communicate()
+    return _clip(f"{shell}: {command}\n{(out or '').strip() or '(no output)'}")
+
+
+def _wait(proc, stop, seconds):
+    """None when it finished. A short reason when Stop or the clock won."""
+    deadline = time.time() + seconds
+    while proc.poll() is None:
+        if stop is not None and stop.is_set():
+            _kill(proc)
+            return "Stopped."
+        if time.time() > deadline:
+            _kill(proc)
+            return "Timed out."
+        time.sleep(0.1)
+    return None
+
+
+def _kill(proc):
+    if proc is None or proc.poll() is not None:
+        return
+    _kill_pid(proc.pid)
+    try:
+        proc.wait(timeout=3)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+
+
+def _kill_pid(pid):
+    if not pid:
+        return
+    subprocess.run(["taskkill", "/F", "/T", "/PID", str(pid)], capture_output=True,
+                   creationflags=subprocess.CREATE_NO_WINDOW)
+
+
+def _diagnose_admin(command, shell, stop):
+    import base64
+    import tempfile
+    path = Path(tempfile.gettempdir()) / f"coopilot-diag-{os.getpid()}.txt"
+    try:
+        path.unlink()
+    except OSError:
+        pass
+    inner = command if shell == "powershell" else "cmd /d /c '" + command + "'"
+    body = inner + " | Out-File -FilePath '" + str(path) + "' -Encoding utf8"
+    encoded = base64.b64encode(body.encode("utf-16le")).decode()
+    launcher = (
+        "$p = Start-Process -FilePath powershell.exe -Verb RunAs -PassThru -WindowStyle Hidden "
+        f"-ArgumentList '-NoProfile','-NonInteractive','-EncodedCommand','{encoded}'\n"
+        "if (-not $p) { 'declined'; exit 1 }\n"
+        "Write-Output $p.Id"
+    )
+    proc = subprocess.Popen(
+        ["powershell", "-NoProfile", "-NonInteractive", "-Command", launcher],
+        stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, creationflags=subprocess.CREATE_NO_WINDOW)
+    # The Windows approval box can sit there; Stop closes our wait. The check itself then gets 20 seconds.
+    note = _wait(proc, stop, 120)
+    if note:
+        return note
+    text = (proc.stdout.read() if proc.stdout else "").strip()
+    if proc.returncode != 0 or not text.isdigit():
+        return "The administrator prompt was declined, so nothing ran."
+    pid = int(text)
+    deadline = time.time() + 20
+    while True:
+        if stop is not None and stop.is_set():
+            _kill_pid(pid)
+            return "Stopped."
+        listed = subprocess.run(["tasklist", "/FI", f"PID eq {pid}", "/NH"], capture_output=True, text=True,
+                                creationflags=subprocess.CREATE_NO_WINDOW)
+        if str(pid) not in (listed.stdout or ""):
+            break
+        if time.time() > deadline:
+            _kill_pid(pid)
+            return f"{shell} as administrator: {command}\nTimed out."
+        time.sleep(0.2)
+    try:
+        written = path.read_text(encoding="utf-8", errors="replace").strip() if path.is_file() else ""
+    except OSError:
+        written = ""
+    finally:
+        try:
+            path.unlink()
+        except OSError:
+            pass
+    return _clip(f"{shell} as administrator: {command}\n{written or '(no output)'}")
+
+
+def _check_diagnose():
+    assert command_ok("powershell", "Get-Service Spooler") == "Get-Service Spooler"
+    assert command_ok("powershell", "Get-Process | Select-Object Name, CPU")
+    assert command_ok("cmd", "ipconfig /all") == "ipconfig /all"
+    assert command_ok("cmd", "sfc /verifyonly") == "sfc /verifyonly"
+    assert command_ok("powershell", "Remove-Item C:\\Windows") is None
+    assert command_ok("powershell", "Get-Process; Remove-Item x") is None
+    assert command_ok("cmd", "ping -t 8.8.8.8") is None
+    assert command_ok("cmd", "dism /online /cleanup-image /restorehealth") is None
+    assert command_ok("cmd", "reg delete HKLM\\x") is None
+    assert command_ok("powershell", "Get-ItemProperty HKLM:\\SAM") is None
+    stopped = type("S", (), {"is_set": lambda self: True})()
+    assert diagnose("Get-Date", "powershell", False, stopped) == "Stopped."
 
 
 def _check_history():
@@ -269,6 +456,7 @@ def _check_history():
 
 
 if __name__ == "__main__":
+    _check_diagnose()
     _check_history()
     for name in ("system", "disks", "windows"):
         out = collect(name)

@@ -70,6 +70,12 @@ def review(action, front_title=""):
         return "ok", ""
     if kind == "open_app" and _ADMIN_APPS.search(action["name"]):
         return "confirm", "admin_app", f"Open {action['name']}? It can change system settings."
+    if kind == "shell":
+        import sysinfo
+        if not sysinfo.command_ok(action.get("shell"), action.get("command")):
+            return "block", "That command is not a read-only diagnostic, so it will not run."
+        who = "as administrator" if action.get("admin") else "with your own account"
+        return "confirm", "", f"Run this read-only check {who}?\n{action['command']}\nStop cancels it. It cannot change the PC."
     if kind == "ado" and action["op"] in ("update", "comment"):
         what = action.get("fields") or action.get("text")
         return "confirm", f"ado_{action['op']}", f"{action['op'].capitalize()} Azure DevOps #{action['id']}?\n{str(what)[:400]}"
@@ -94,6 +100,8 @@ def _check():
     assert review({"action": "open_app", "name": "Notepad"})[0] == "ok"
     assert review({"action": "ado", "op": "update", "id": 5, "fields": {"state": "Removed"}})[0] == "confirm"
     assert review({"action": "ado", "op": "create", "type": "Bug", "title": "x"})[0] == "ok"
+    assert review({"action": "shell", "shell": "powershell", "command": "Get-Date", "admin": False})[0] == "confirm"
+    assert review({"action": "shell", "shell": "powershell", "command": "Remove-Item C:\\Windows", "admin": True})[0] == "block"
     print("safety ok")
 
 

@@ -15,7 +15,7 @@ TOPICS = ("system", "disks", "processes", "network", "services", "events", "wind
 PLAYBOOKS = """Work account (no screen, already signed in):
 - account reads this user's Outlook and OneDrive. Use it for meetings, mail, a person, tasks, and recent work files.
   You do not know any of that until the result comes back. Never answer these with "checking" or "looking up".
-- ops: next; agenda when=today|tomorrow|week; mail (unread, or query= a name or subject); person query=name;
+- ops: next; agenda when=today|tomorrow|week; mail (unread, or query= a name or subject; each result includes the message text); person query=name;
   tasks; files; me (email, title, manager); recordings (days=7, optional query= a meeting name).
   focus for me is email, title, or manager.
 - Teams recordings: account op recordings finds the meeting on this user's calendar (a partial name is matched to the full subject),
@@ -32,9 +32,22 @@ Playbooks:
   ctrl+5 Calls, ctrl+e search, ctrl+n new chat. In a call: ctrl+shift+m mute, ctrl+shift+o camera, ctrl+shift+k raise hand,
   ctrl+shift+h leave. Chat with someone: open_url msteams:/l/chat/0/0?users=name@example.com then focus Teams.
 - Outlook: use account to read mail and the calendar, and account event to add meetings, reminders, and recurring events.
+  The mail result includes each message's text, plus Recording and Link lines for a video or another address in that message.
+  Cite a recording by the name on that line, the sender, and the received time. Keep Recording and Link lines so a click opens them.
+  Keep a markdown link on a mail, file, or meeting too.
+  Answer from that text (what they ask, dates, decisions), not from the subject alone.
   Never open Outlook on screen for a reminder or calendar item. The screen is only for sending or replying to mail.
   New email: open_url mailto:a@b.ca?subject=Hello%20there&body=Line%20one (percent-encode spaces and new lines as %0A).
   Keys: ctrl+1 Mail, ctrl+2 Calendar, ctrl+shift+m new email, ctrl+r reply, f9 send/receive, ctrl+enter send.
+- OPS systems (use the matching one; do not wander the intranet looking for it):
+  EWRS at https://www.ewrs.gov.on.ca is the only desk booking tool. It is not WIN. A desk on the calendar is "Workstation … Reserved" from EWRS-noreply@ontario.ca; cancelling that Outlook event does not cancel the desk.
+  Book only when asked, and ask before the final Book, Cancel, or Check-In. Open that site and use these controls, in order: Home, Book a workspace, Location, Floor (several allowed), Time period, Start date, then Repeat and End date only for more than one day, Search, Book, Yes.
+  Weekdays only. A normal office is the same day through 28 days ahead. A Touchdown Centre is at most 7 days ahead, not a repeating booking, and some floors refuse the same day.
+  Check in from My Bookings, on the office network, the same day. Full day and morning by 10:00, afternoon by 1:00. A reminder comes 30 minutes before; miss it and the desk is released. If check-in fails on site, disconnect Global Protect, check in, then reconnect. Check out from My Bookings when leaving.
+  First visit with no access: Register now, reporting manager and division, up to five delegates. The manager approves (a reminder every three days, the request expires after two weeks). Help is EWRSfeedback@ontario.ca, or Contact Us in EWRS.
+  WIN is pay, time, and leave, opened from InsideOPS. It needs an OPS computer. From home it also needs Global Protect. It does not book desks.
+  InsideOPS (intra.ontario.ca) is already read in the background for policy and how-to questions. OPSSC (1-888-996-7772, opssc@ontario.ca, ONRequest) is the IT and HR desk. IFIS is expenses. LearnON is training. Global Protect is the VPN.
+- Deeper PC checks: prefer inspect. When that is not specific enough, shell runs one read-only PowerShell or cmd command. It always asks before it runs, admin true also raises the Windows approval prompt, and Stop cancels it. Anything that changes, deletes, installs, downloads, or restarts is refused, so do not try to rephrase it.
 - Before sending a message or email, joining, starting or leaving a call, accepting or declining a meeting, or deleting
   anything: only do it if the task explicitly asks for that. Otherwise prepare it and say it is ready for the user to send.
 """
@@ -122,7 +135,7 @@ Reply with exactly one fenced json object and no other text:
 First decide what the task really needs. The goal is to actually finish it, the way the user meant it:
 - Just an answer (a question, writing, explaining, or advice) that is not about this user's mailbox, calendar, or files, and that does not depend on a live page: reply with only done and put the full answer in summary. Do not touch the PC.
 - A timetable, fare, score, opening hours, or anything that changes through the day: open the official page, read it, then answer from what you read and cite it. Never guess a time or a price.
-- This user's meetings, mail, people, tasks, work files, or meeting recordings and transcripts: use account, then done with the actual names and times from that result. Never from memory.
+- This user's meetings, mail, people, tasks, work files, or meeting recordings and transcripts: use account, then done with the actual names, times, and what the messages say from that result. Never from memory.
 - Facts or files from this PC: use the invisible skills (inspect, list_dir, read_file, write_file, ado, read_clipboard, account).
   They run in the background without the user noticing.
 - Anything that changes or creates something in an app (book or block calendar time, send, reply, fill a form, click in an
@@ -156,6 +169,7 @@ Actions:
 {{"action":"window","title":"part of a window title","op":"maximize"}}
 {{"action":"read_clipboard"}}
 {{"action":"inspect","topic":"system"}}
+{{"action":"shell","shell":"powershell","command":"Get-NetAdapter","admin":false}}
 {{"action":"account","op":"next"}}
 {{"action":"list_dir","path":"%USERPROFILE%\\\\Documents"}}
 {{"action":"read_file","path":"C:\\\\path\\\\file.xlsx"}}
@@ -177,6 +191,8 @@ read_clipboard returns the clipboard text; use ctrl+a or a selection then ctrl+c
 inspect reads this PC without changing it. Topics: {", ".join(TOPICS)}. windows lists titles with their monitor.
 Use inspect for questions about the system, performance, disk space, network, failing services, or recent errors,
 then explain findings in done.summary.
+shell is one read-only command, shell powershell or cmd, admin true only when the check needs elevation.
+It always asks the user first. Wait for its output before done. Do not use it to change the PC.
 {SKILLS}
 {FLOW}
 {PLAYBOOKS}
@@ -201,11 +217,11 @@ CAPABILITY_REMINDER = ('This application executes your JSON actions on the user\
                        'or {"action":"open_app","name":"Settings"}. Reply with one fenced JSON object.')
 
 _POINT_ACTIONS = {"click", "double_click", "right_click", "move"}
-_ACTIONS = _POINT_ACTIONS | {"type", "key", "scroll", "open_app", "focus", "focus_info", "inspect", "wait", "done",
+_ACTIONS = _POINT_ACTIONS | {"type", "key", "scroll", "open_app", "focus", "focus_info", "inspect", "shell", "wait", "done",
                              "drag", "open_url", "open_path", "window", "read_clipboard",
                              "list_dir", "read_file", "write_file", "ado", "say", "ask", "look", "account"}
 # These end a batch: the next step depends on what they return.
-_ENDS_BATCH = {"done", "ask", "look", "account", "focus_info"}
+_ENDS_BATCH = {"done", "ask", "look", "account", "focus_info", "shell"}
 # Mouse and keyboard actions: they take over the user's PC, so the overlay shows and a screenshot is needed.
 VISIBLE = {"click", "double_click", "right_click", "move", "drag", "type", "key", "scroll", "open_app", "focus",
            "window", "open_url", "open_path"}
@@ -392,6 +408,13 @@ def _validate(obj):
         if not isinstance(topic, str) or topic.strip().lower() not in TOPICS:
             return None
         return {"action": action, "topic": topic.strip().lower()}
+    if action == "shell":
+        import sysinfo
+        shell = str(obj.get("shell") or "powershell").strip().lower()
+        command = sysinfo.command_ok(shell, obj.get("command"))
+        if not command:
+            return None
+        return {"action": "shell", "shell": shell, "command": command, "admin": obj.get("admin") is True}
     if action == "wait":
         ms = _num(obj.get("ms"))
         if ms is None or ms < 0:
@@ -523,6 +546,9 @@ def _check():
     assert fenced == [{"action": "done", "summary": "Saved"}], fenced
     assert parse_actions("", [("json", '{"action":"inspect","topic":"Disks"}')]) == [{"action": "inspect", "topic": "disks"}]
     assert parse_actions("", [("json", '{"action":"inspect","topic":"registry"}')]) is None
+    assert parse_actions("", [("json", '{"action":"shell","command":"Get-Service Spooler"}')]) == [
+        {"action": "shell", "shell": "powershell", "command": "Get-Service Spooler", "admin": False}]
+    assert parse_actions("", [("json", '{"action":"shell","command":"Remove-Item C:\\\\Windows","admin":true}')]) is None
     new = parse_actions("", [("json", '{"actions":[{"action":"drag","x":1,"y":2,"to_x":3,"to_y":4},'
                                        '{"action":"window","title":"Edge","op":"Maximize"},{"action":"read_clipboard"},'
                                        '{"action":"open_url","url":"https://example.com"},{"action":"move","x":5,"y":6}]}')])
